@@ -710,6 +710,232 @@ hotel_review |>
 
 * Ramada's responsiveness is a real strength: it shows guests that the management is listening. However, replying does not by itself fix the underlying problems that cause the low ratings.
 
+## 4.4 Statistical tests
+
+A graph can suggest a difference, but a statistical test tells us whether the difference is real or could just be chance. We use a significance level of 5%: if the p-value is below 0.05 we say the result is statistically significant. Because price and ratings are skewed or ordinal, we mainly use non-parametric tests (Kruskal-Wallis, Wilcoxon, Spearman) that do not assume a normal distribution.
+
+### Test 1: Does price differ across types of accommodation? (Kruskal-Wallis)
+
+* H0: median price is the same for Hotels, Bed and Breakfasts (B&Bs) and Specialty Lodging.
+* H1: at least one type has a different price.
+
+```{r test-kruskal-price}
+price_data <- hotel_main |> filter(!is.na(price))
+
+kruskal.test(price ~ category, data = price_data)
+
+# Which pairs differ? (Bonferroni-adjusted p-values)
+pairwise.wilcox.test(price_data$price, price_data$category, p.adjust.method = "bonferroni")
+```
+
+**Interpretation:**
+
+* The Kruskal-Wallis p-value is 0.039, which is below 0.05, so we reject H0: price is not the same across all types of accommodation.
+
+* The pairwise tests show that the only significant difference is Hotel vs Specialty Lodging (adjusted p = 0.036). Bed and Breakfasts are not significantly different from the others.
+
+* The evidence is moderate: the type of accommodation matters a little, but much less than star class.
+
+### Test 2: Which variables are related to price? (Spearman correlation)
+
+* H0: there is no monotonic relationship between price and the variable (correlation = 0).
+
+```{r test-spearman}
+test_vars <- c("rating_overall", "rating_value", "rating_room", "room", "photo", "review", "amenity_count", "star_num")
+
+spearman_table <- map_dfr(test_vars, function(v) {
+  ok <- complete.cases(price_data$price, price_data[[v]])
+  t <- cor.test(price_data$price[ok], price_data[[v]][ok], method = "spearman", exact = FALSE)
+  tibble(variable = v, n = sum(ok), rho = round(unname(t$estimate), 3), p_value = signif(t$p.value, 3))
+})
+
+spearman_table
+```
+
+**Interpretation:**
+
+* The strongest positive relationships with price are star class (rho about 0.50), the room rating (about 0.50), the overall rating (about 0.43) and the value rating (about 0.33). All have p-values far below 0.05.
+
+* The number of rooms has a significant negative relationship (rho about -0.20): larger properties tend to charge less per night.
+
+* Photos (0.16) and number of amenities (0.10) are statistically significant but very weak. The number of reviews is not significant (p = 0.30), which means popularity does not translate into price.
+
+* Quality indicators (stars and room quality) are what the market pays for. This is important for Ramada, whose room rating (3.2) is low.
+
+### Test 3: Is the type of accommodation linked to its price level? (Chi-square)
+
+* H0: type of accommodation and price level are independent.
+
+```{r test-chisq}
+chi_data <- hotel_main |>
+  filter(price_cat != "Unknown") |>
+  mutate(price_level = if_else(price_cat %in% c("Premium", "Luxury"), "Premium/Luxury", as.character(price_cat)))
+
+chi_table <- table(chi_data$category, chi_data$price_level)
+chi_table
+chisq.test(chi_table)
+```
+
+**Interpretation:**
+
+* The chi-square p-value is 0.002 (below 0.05), so we reject independence: the type of accommodation is linked to its price level.
+
+* Specialty Lodging is much more likely to be Premium/Luxury (26 of 134 properties, about 19%) than Hotels (6 of 151, about 4%). Hotels are mostly Economy or Moderate.
+
+* This fits the earlier boxplots: very expensive properties are mostly specialty lodges, not hotels like Ramada.
+
+### Test 4: Is Ramada's rating different from competitors? (Wilcoxon rank-sum)
+
+* H0: Ramada and Hamilton competitors have the same rating distribution.
+
+* We run the test for 7 ratings, so we use the Bonferroni rule: significant only if p < 0.05 / 7 = 0.007. This avoids false alarms from running many tests.
+
+```{r test-wilcoxon}
+both <- hotel_review |> filter(group %in% c("Ramada", "Hamilton competitors"))
+
+wilcoxon_table <- map_dfr(rating_vars, function(v) {
+  ok <- both |> filter(!is.na(.data[[v]]))
+  t <- wilcox.test(ok[[v]] ~ ok$group, exact = FALSE)
+  tibble(
+    rating      = v,
+    Ramada_mean = round(mean(ok[[v]][ok$group == "Ramada"]), 2),
+    Comp_mean   = round(mean(ok[[v]][ok$group == "Hamilton competitors"]), 2),
+    p_value     = signif(t$p.value, 3)
+  )
+}) |>
+  mutate(difference = Ramada_mean - Comp_mean,
+         verdict = case_when(
+           p_value >= 0.05 / 7 ~ "No significant difference",
+           difference < 0      ~ "Ramada significantly LOWER",
+           TRUE                ~ "Ramada significantly HIGHER"))
+
+wilcoxon_table
+```
+
+**Interpretation:**
+
+* Using the stricter Bonferroni threshold (0.007), Ramada is significantly lower than competitors on six of the seven ratings, with p-values far below 0.001.
+
+* The gaps are largest for the overall rating (-0.92), room (-0.81) and value (-0.81), then sleep (-0.68), cleanliness (-0.59) and service (-0.58).
+
+Location is the only rating with no significant difference (4.39 for both, p = 0.79).
+
+* So Ramada's weaknesses are real and not due to chance, and location is its one area of parity with competitors.
+
+### Test 5: Do traveller types rate Ramada differently? (Kruskal-Wallis)
+
+```{r test-trip}
+kruskal.test(rating_overall ~ trip_type, data = ramada_reviews)
+```
+
+### Test 6: Has Ramada improved since the COVID period? (Wilcoxon)
+
+* Compare reviews posted up to 2019 with reviews posted from 2022 onward.
+
+```{r test-improve}
+ramada_period <- ramada_reviews |>
+  filter(review_year <= 2019 | review_year >= 2022) |>
+  mutate(period = if_else(review_year <= 2019, "Up to 2019", "2022 onward"))
+
+ramada_period |> group_by(period) |> summarise(n = n(), mean_rating = round(mean(rating_overall), 2))
+
+wilcox.test(rating_overall ~ period, data = ramada_period, exact = FALSE)
+```
+
+**Interpretation of Tests 5 and 6:**
+
+* Test 5: p = 0.052, just above 0.05, so the differences between traveller types are suggestive but not statistically significant. Business travellers look less satisfied, but we cannot be certain.
+
+* Test 6: the average rating was 2.99 up to 2019 and 3.04 from 2022 onward, with p = 0.68. There is no significant improvement since the COVID period, so the problems have not been solved over time.
+
+### Tests 7 to 10: Parametric tests (t-test, ANOVA, Pearson correlation)
+
+So far we used non-parametric tests, which compare ranks. Parametric tests compare means and are more powerful when their assumptions are reasonable. Their main assumption is roughly normal data, or a large sample size (the Central Limit Theorem makes means behave normally when samples are large). Here we use them where this holds:
+
+* review ratings, where we have hundreds of reviews per group, and
+* log(price), which is much more symmetric than price (see Graph 1).
+
+When we compare means of `log(price)`, a difference can be turned into a percentage: `exp(difference) - 1`.
+
+#### Test 7: Do Ramada and competitors have different average review ratings? (Welch t-test)
+
+* H0: the mean overall rating is the same for Ramada and Hamilton competitors.
+* H1: the means are different. 
+
+```{r test-ttest-rating}
+t.test(rating_overall ~ group, data = both)
+```
+
+#### Test 8: Are Hamilton hotels cheaper than hotels in other areas? (Welch t-test on log price)
+
+* H0: mean log(price) is the same in Hamilton and elsewhere.
+
+```{r test-ttest-price}
+price_area <- price_data |>
+  mutate(market = if_else(locality == "Hamilton", "Hamilton", "Other areas"))
+
+t.test(log(price) ~ market, data = price_area)
+
+# "Typical price" = exp(mean of log price), which is the geometric mean
+price_area |>
+  group_by(market) |>
+  summarise(hotels = n(), typical_price = round(exp(mean(log(price)))))
+```
+
+#### Test 9: Does price differ by star category? (One-way ANOVA and Tukey test)
+
+* H0: mean log(price) is the same for all star categories.
+* If ANOVA is significant, Tukey's HSD shows which pairs differ.
+
+```{r test-anova}
+anova_model <- aov(log(price) ~ star_cat, data = price_data)
+summary(anova_model)
+
+TukeyHSD(anova_model)
+
+price_data |>
+  group_by(star_cat) |>
+  summarise(hotels = n(), typical_price = round(exp(mean(log(price)))))
+```
+
+```{r test-anova-check}
+# Check the ANOVA assumption: are the residuals roughly normal?
+qqnorm(residuals(anova_model), main = "Normal Q-Q plot of ANOVA residuals")
+qqline(residuals(anova_model), col = "red")
+
+# Non-parametric double-check
+kruskal.test(log(price) ~ star_cat, data = price_data)
+```
+
+#### Test 10: Are ratings linearly related to price? (Pearson correlation)
+
+* H0: the Pearson correlation between log(price) and the variable is 0.
+* We use log(price) because Pearson correlation is sensitive to extreme values.
+
+```{r test-pearson}
+pearson_vars <- c("rating_overall", "rating_room", "rating_value", "star_num")
+
+pearson_table <- map_dfr(pearson_vars, function(v) {
+  ok <- complete.cases(price_data$price, price_data[[v]])
+  t  <- cor.test(log(price_data$price[ok]), price_data[[v]][ok], method = "pearson")
+  tibble(variable = v, n = sum(ok), r = round(unname(t$estimate), 3),
+         ci_low = round(t$conf.int[1], 3), ci_high = round(t$conf.int[2], 3),
+         p_value = signif(t$p.value, 3))
+})
+
+pearson_table
+```
+
+**Interpretation of Tests 7 to 10:**
+
+* Test 7 (t-test, ratings): t = 12.1 and p < 0.001, so we reject H0. Competitors average 3.93 and Ramada 3.01; the 95% confidence interval says the true gap is between 0.78 and 1.08 stars. This confirms the Wilcoxon result from Test 4: Ramada is clearly rated lower.
+
+* Test 8 (t-test, price): p < 0.001. The typical Hamilton hotel charges about $161 compared with about $204 elsewhere, so Hamilton is roughly 21% cheaper (the confidence interval on the log scale means somewhere between 12% and 29% cheaper). Ramada's $183.50 is above the typical Hamilton price but below the typical price in other areas.
+
+* Test 9 (ANOVA): F = 19.9 and p < 0.001, so price differs across star categories. Tukey's test shows where: 4-5 star hotels (typical price $261) cost about 50% more than 3-3.5 star hotels ($174) and about 94% more than 1-2.5 star hotels ($134), and both differences are significant. The 1-2.5, 3-3.5 and Unrated groups are not significantly different from each other (p between 0.10 and 0.96). So the big price jump only comes at the 4-star level. Ramada (3.5 stars) belongs to the 3-3.5 group, and $183.50 is about 5% above that group's typical price. The residuals are roughly normal in the middle of the plot but not perfectly so in the tails, which is acceptable for a sample of 435 hotels, and the non-parametric Kruskal-Wallis check gives the same conclusion.
+
+* Test 10 (Pearson): log(price) has a moderate positive linear correlation with star class (r = 0.54), the room rating (0.39), the overall rating (0.35) and the value rating (0.24). All p-values are far below 0.05. These correlations are stronger than the raw-price correlations in the heatmap (for example 0.35 instead of 0.22 for the overall rating) because the log transformation stops a few extreme prices from dominating. Star class and room quality are what the market pays for most; the value rating is the weakest link to price.
+
 
 
 
