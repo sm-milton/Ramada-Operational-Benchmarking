@@ -936,6 +936,181 @@ pearson_table
 
 * Test 10 (Pearson): log(price) has a moderate positive linear correlation with star class (r = 0.54), the room rating (0.39), the overall rating (0.35) and the value rating (0.24). All p-values are far below 0.05. These correlations are stronger than the raw-price correlations in the heatmap (for example 0.35 instead of 0.22 for the overall rating) because the log transformation stops a few extreme prices from dominating. Star class and room quality are what the market pays for most; the value rating is the weakest link to price.
 
+## Dimensionality reduction: Principal Component Analysis (PCA) of the ratings
+
+We have six rating scores for each hotel (cleanliness, location, room, service, sleep, value), and the correlation heatmap showed they overlap a lot. PCA combines correlated variables into a few new variables called principal components (PCs) that capture most of the information. PC1 captures the largest possible share of the variation, PC2 the next largest, and so on. We standardize the ratings first (`scale. = TRUE`) so that each counts equally. Ramada is included because it is in `hotel_pred`.
+
+```{r pca-run}
+# Hotels with all six ratings
+pca_input <- hotel_all |>
+  select(id, name, locality, rating_cleanliness, rating_location,
+         rating_room, rating_service, rating_sleep, rating_value) |>
+  drop_na()
+
+cat("Hotels used for PCA:", nrow(pca_input), "\n")
+
+pca_result <- prcomp(pca_input |> select(starts_with("rating_")), scale. = TRUE)
+summary(pca_result)
+```
+
+```{r pca-scree}
+# How much information does each component keep?
+var_explained <- tibble(component = paste0("PC", 1:6),
+                        pct = pca_result$sdev^2 / sum(pca_result$sdev^2) * 100)
+
+ggplot(var_explained, aes(x = component, y = pct)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), vjust = -0.3) +
+  labs(title = "Scree plot: share of variation explained by each component",
+       x = NULL, y = "% of variation")
+```
+
+```{r pca-loadings}
+# Loadings show how much each rating contributes to a component.
+# The sign of a PC is arbitrary, so we reverse it so that a HIGHER score means BETTER ratings.
+loadings <- data.frame(
+  rating = rownames(pca_result$rotation),
+  round(-pca_result$rotation[, 1:2], 2)
+)
+
+loadings
+```
+
+```{r pca-scores}
+pca_scores <- as_tibble(-pca_result$x[, 1:2]) |>
+  bind_cols(pca_input |> select(id, name, locality)) |>
+  mutate(group = case_when(id == ramada_id ~ "Ramada",
+                           locality == "Hamilton" ~ "Hamilton competitors",
+                           TRUE ~ "Other areas"))
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, colour = group)) +
+  geom_point(data = filter(pca_scores, group != "Ramada"), alpha = 0.6) +
+  geom_point(data = filter(pca_scores, group == "Ramada"), size = 5) +
+  scale_colour_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "steelblue",
+                                 "Other areas" = "grey70")) +
+  labs(title = "Hotels on the first two principal components",
+       subtitle = "Right = better overall ratings; Up = location is strong compared with other ratings",
+       x = "PC1 (overall quality score)", y = "PC2 (location vs other aspects)", colour = NULL)
+```
+
+```{r pca-ramada}
+ram <- pca_scores |> filter(group == "Ramada")
+ham <- pca_scores |> filter(group == "Hamilton competitors")
+
+cat("Ramada PC1:", round(ram$PC1, 2), "| Hamilton competitors average PC1:", round(mean(ham$PC1), 2), "\n")
+cat("Share of Hamilton competitors with a BETTER PC1 score than Ramada:",
+    round(mean(ham$PC1 > ram$PC1) * 100), "%\n")
+cat("Ramada PC2:", round(ram$PC2, 2), "| Hamilton competitors average PC2:", round(mean(ham$PC2), 2), "\n")
+
+# Does the PC1 quality score relate to price?
+pca_price <- pca_scores |>
+  left_join(hotel_all |> select(id, price), by = "id") |>
+  filter(!is.na(price))
+
+cor.test(pca_price$PC1, log(pca_price$price))
+```
+
+**Interpretation:**
+
+* Two components are enough. PC1 keeps 82.7% of the information in the six ratings and PC2 another 6.8%, so together they keep 89.4%. The scree plot drops sharply after PC1.
+
+* What the components mean. PC1 gives almost equal weight (0.36 to 0.42) to all six ratings, so it is an overall quality score. PC2 is dominated by location (0.91) with small opposite weights on the other ratings, so it measures how strong the location is compared with the other aspects.
+
+* Ramada's position. Ramada's quality score (PC1) is -2.79 compared with an average of -1.41 for Hamilton competitors, and 75% of Hamilton competitors score better. On PC2 Ramada scores 0.87 compared with about -0.08 for competitors, which means its location rating is unusually strong relative to its other ratings. On the plot Ramada sits to the left of most hotels (lower overall quality) and above the cloud (strong location). This matches the earlier findings.
+
+* Link to price. The quality score has a significant correlation with log price (r = 0.34, p < 0.001): hotels with better overall ratings charge more.
+
+* Why PCA matters? The six ratings overlap so much that one or two components can replace them in a model and avoid the multicollinearity problem. We kept the original ratings in Phase 4 because they are easier to explain to the manager.
+
+## Cluster analysis: who are Ramada's true peers?
+
+Comparing Ramada with all Hamilton hotels mixes backpackers, motels and large hotels. K-means clustering groups hotels that are similar on price, overall rating, value rating and number of rooms, so we can see which group Ramada really belongs to. Variables are standardized first so that price (in dollars) does not dominate. We use Ramada's current price of $183.50 (from the brief) because `hotel_pred` has no price.
+
+```{r cluster-prepare}
+cluster_data <- hotel_all |>
+  filter(locality == "Hamilton") |>
+  mutate(price = if_else(id == ramada_id, 183.5, price)) |>
+  select(id, name, category, price, rating_overall, rating_value, room) |>
+  drop_na()
+
+cat("Hamilton hotels with complete data:", nrow(cluster_data), "\n")
+
+cluster_scaled <- scale(cluster_data |> select(price, rating_overall, rating_value, room))
+```
+
+**How many clusters?** The "elbow" plot shows how tightly packed the clusters are for 1 to 8 clusters. We look for the point where adding clusters stops helping much.
+
+```{r cluster-elbow}
+set.seed(123)
+wss <- sapply(1:8, function(k) kmeans(cluster_scaled, centers = k, nstart = 25)$tot.withinss)
+
+tibble(k = 1:8, wss = wss) |>
+  ggplot(aes(x = k, y = wss)) +
+  geom_line() + geom_point(size = 2) +
+  labs(title = "Elbow plot", x = "Number of clusters (k)", y = "Total within-cluster variation")
+```
+
+```{r cluster-run}
+set.seed(123)
+km <- kmeans(cluster_scaled, centers = 3, nstart = 25)
+
+cluster_data$cluster_raw <- km$cluster
+
+# Number the groups by average rating (Group 1 = lowest rated) so the labels are easy to read
+cluster_order <- cluster_data |>
+  group_by(cluster_raw) |>
+  summarise(avg_rating = mean(rating_overall)) |>
+  arrange(avg_rating) |>
+  mutate(group_no = row_number())
+
+cluster_data <- cluster_data |>
+  left_join(cluster_order |> select(cluster_raw, group_no), by = "cluster_raw") |>
+  mutate(cluster = factor(paste("Group", group_no), levels = paste("Group", 1:3)))
+
+# Profile of each group
+cluster_data |>
+  group_by(cluster) |>
+  summarise(hotels = n(), avg_price = round(mean(price)), avg_rating = round(mean(rating_overall), 2),
+            avg_value_rating = round(mean(rating_value), 2), avg_rooms = round(mean(room)))
+```
+
+```{r cluster-ramada}
+ramada_group <- cluster_data |> filter(id == ramada_id) |> pull(cluster)
+cat("Ramada belongs to:", as.character(ramada_group), "\n\n")
+
+# Ramada's true peers
+cluster_data |>
+  filter(cluster == ramada_group) |>
+  arrange(desc(price)) |>
+  select(name, category, price, rating_overall, rating_value, room)
+```
+
+```{r cluster-plot}
+ggplot(cluster_data, aes(x = rating_overall, y = price, colour = cluster, size = room)) +
+  geom_point(alpha = 0.7) +
+  geom_point(data = filter(cluster_data, id == ramada_id), colour = "black", shape = 1, stroke = 1.5) +
+  geom_text(data = filter(cluster_data, id == ramada_id), label = "Ramada", colour = "black",
+            vjust = -1.5, size = 4, show.legend = FALSE) +
+  labs(title = "Hamilton hotel groups (circle = Ramada)",
+       x = "Overall rating", y = "Price per night (NZD)", colour = "Group", size = "Rooms")
+```
+
+**Interpretation:**
+
+* The elbow plot declines smoothly without a sharp bend, so the choice is partly a judgement. Three groups give a clear and useful story, but the result should be seen as a description, not a precise rule. Only 50 Hamilton hotels have complete data.
+
+* Group 1 (17 hotels): average price $136, rating 3.12, value rating 3.24, about 30 rooms. Mostly motels and lodges with average guest satisfaction.
+
+* Group 2 (3 hotels): large properties (about 163 rooms), price $236, rating 3.73.
+
+* Group 3 (30 hotels): price $206, rating 4.39, value rating 4.47, small (about 21 rooms). These are the best-rated hotels.
+
+* Ramada belongs to Group 1, so its real peers are lower-rated motels and lodges, not the top-rated hotels. Within this group, Ramada's price of $183.50 is the second highest (only Sails Motor Inn at $293 is higher) and about $48 (35%) above the group average of $136, while its rating (3.0) and value rating (3.3) are about the same as the group's (3.12 and 3.24).
+
+* By contrast, guests of the high-rated Group 3 pay only about $22 (11%) more than Ramada's price but rate their hotels 4.39.
+
+* Ramada charges almost the price of the top group for the satisfaction level of its peer group. This explains its weak value-for-money score and is another reason not to raise the price.
+
 
 
 
