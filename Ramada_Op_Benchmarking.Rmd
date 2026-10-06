@@ -710,6 +710,6 @@ hotel_review |>
 
 * Ramada's responsiveness is a real strength: it shows guests that the management is listening. However, replying does not by itself fix the underlying problems that cause the low ratings.
 
-TSET GIT
+
 
 
