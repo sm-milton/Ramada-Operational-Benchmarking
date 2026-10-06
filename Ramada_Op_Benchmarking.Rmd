@@ -1,0 +1,715 @@
+---
+title: "Ramada by Wyndham Hamilton City Center: Review Benchmarking and Price Prediction"
+author: "Sheikh Mohammad Milton, ID No. 1713714"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+set.seed(123) # makes random steps repeatable
+ramada_id <- 3572177  # Assigning Ramada's Tripadvisor id
+
+```
+
+#1. Introduction
+
+## 1.1 Purpose of the analysis
+
+The purpose of this assignment is to conduct a comprehensive, data-driven analysis and develop a machine learning model to support strategic decision-making for the manager of Ramada by Wyndham Hamilton City Center. 
+
+The manager of **Ramada by Wyndham Hamilton City Center** (Tripadvisor id 3572177) wants to know:
+
+1. What are the hotel's **strengths and weaknesses**, and how does it compare with **competitors**?
+
+2. What price per night would a **machine learning model** estimate for the hotel?
+
+3. What should the hotel **do to improve**, and should the current average price of **$183.50** change?
+
+For finding out the answers of the above question following analysis has been presented.
+
+## 1.2 Load packages
+
+```{r initial}
+# Install and load packages
+
+if(!require("pacman"))install.packages("pacman")
+
+pacman::p_load(readr, dplyr, tidyr, stringr, lubridate, purrr, ggplot2, gridExtra, GGally, corrplot)
+pacman::p_load(tidytext, textstem, wordcloud, textdata, topicmodels)
+pacman::p_load(DescTools, skimr, finalfit, rstatix, huxtable, jtools)
+pacman::p_load(knitr, easystats, gtsummary, gt, scales)
+
+```
+
+# 2. Data Import and Initial Inspection
+
+## 2.1 Import the dataset
+
+```{r}
+hotel_main <- read_csv("week14_hotelmain.csv")
+hotel_pred <- read_csv("week14_hotelpred.csv")
+hotel_review <- read_csv("week14_review.csv")
+```
+
+## 2.2 Initial Inspection
+
+```{r}
+# How many rows and columns in each file?
+tibble(file = c("hotel_main", "hotel_pred", "hotel_review"),
+       rows = c(nrow(hotel_main), nrow(hotel_pred),
+                nrow(hotel_review)),
+       columns = c(ncol(hotel_main), ncol(hotel_pred),
+                   ncol(hotel_review)))
+
+# Variable names, types and first values
+glimpse(hotel_main)
+glimpse(hotel_review)
+
+# A look at a few rows (only key columns, so the table is readable)
+hotel_main |>
+  select(id, name, category, locality, hotel_class, price_class, price, room, review, rating_overall) |>
+    head(5)
+
+hotel_pred |>
+  select(id, name, category, locality, hotel_class, price_class, room, review, rating_overall)
+
+hotel_review |>
+  select(hotel_id, review_date, trip_type, rating_overall, title) |>
+  head(5)
+
+# A quick look of duplicate rows
+
+cat("Duplicate rows in hotel_main:", sum(duplicated(hotel_main)), "\n")
+
+cat("Duplicate rows in hotel_review:", sum(duplicated(hotel_review)), "\n")
+
+cat("Ramada in hotel_main? ", ramada_id %in% hotel_main$id, "\n")
+
+cat("Ramada in hotel_pred? ", ramada_id %in% hotel_pred$id, "\n")
+
+cat("Ramada reviews in hotel_review:", sum(hotel_review$hotel_id == ramada_id), "\n")
+
+cat("Review date range:", format(min(hotel_review$review_date)), "to", format(max(hotel_review$review_date)), "\n")
+
+# Basic summary of the main numeric variables
+hotel_main |>
+  select(price, room, photo, review, hotel_class, rating_overall) |>
+  summary()
+```
+
+## 2.3 Initial Findings
+
+* **Size:** `hotel_main` has 729 rows and 47 columns (one row per accommodation), `hotel_pred` has a single row (Ramada) and 46 columns, and `hotel_review` has 9,585 reviews and 19 columns.
+
+* **Ramada is only in `hotel_pred`**, not in `hotel_main`, so the price model never sees Ramada while learning. Its 349 reviews are in `hotel_review` (Tripadvisor shows 360 reviews in total on the hotel page).
+
+* **Duplicates:** 8 duplicated hotel rows and 1 duplicated review. They will be removed before further analysis.
+
+* **Price is very skewed:** the median is about $190 but the mean is about $242 and the maximum is $4,014.50, so a few luxury lodges pull the average up.
+
+* **`hotel_class` has many zeros** (more than half of the hotels). A hotel cannot have zero stars, so 0 means "not rated", which we handle in Phase 2.
+
+* **Amenity columns contain only 1 or `NA`**, so `NA` means "not listed".
+
+* Reviews run from February 2005 to July 2026, so we can study trends over time.
+
+* Some categorical data has been treated as CHARACTER Data Type which have to be converted to CATEGORICAL Data before analysis.
+
+# 3. Data perpetration
+
+## 3.1 Missing value management
+
+Missing values (`NA`) can break models and bias averages. First we measure how much is missing in each variable, then we decide purposefully what to do for each group of variables (not just delete everything).
+
+```{r missing-main}
+# Percentage of missing values in each column of hotel_main
+
+missing_main <- hotel_main |>
+  summarise(across(everything(), ~ mean(is.na(.x)) * 100)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "pct_missing") |>
+  filter(pct_missing > 0) |>
+  arrange(desc(pct_missing))
+
+print(missing_main, n = Inf)
+```
+
+```{r missing-main}
+# Number and percentage of missing values in each column of hotel_main
+
+missing_main <- tibble(
+  variable = names(hotel_main),
+  n_missing = colSums(is.na(hotel_main)),
+  pct_missing = round(colMeans(is.na(hotel_main)) * 100, 1)) |>
+  filter(n_missing > 0) |>
+  arrange(desc(n_missing))
+
+kable(missing_main,
+      col.names = c("Variable", "Missing values (count)", "Missing (%)"),
+      caption = paste("Missing values in hotel_main (total rows:", nrow(hotel_main), ")"))
+```
+
+**Interpretation:**
+
+* The amenity columns have the most missing values (about 48% to 94%). Because they only contain 1 or `NA`, a missing value really means "the amenity is not listed", so replacing it with 0 is sensible.
+
+* Price and price class are each missing for 39% of hotels, and they are missing for exactly the same 286 hotels. Those hotels cannot be used to train a price model. It also means `price_class` is built from price, so we must not use it to predict price (leakage).
+
+* Offer prices are about 68% missing and are almost identical to price, so they are not used as predictors.
+
+* Ratings are missing for 16% to 28% of hotels, mostly hotels with no reviews at all.
+
+* In the review file, `rating_overall` is never missing but the sub-ratings (cleanliness, room, sleep, value, location) are missing for 54% to 59% of reviews, because guests often leave only an overall rating. `hotel_response` is missing for 49% of reviews, which simply means the hotel did not reply.
+
+```{r missing-review}
+# Missing values in the review file
+hotel_review |>
+  summarise(across(everything(), ~ mean(is.na(.x)) * 100)) |>
+  pivot_longer(everything(), names_to = "variable",
+               values_to = "pct_missing") |>
+  filter(pct_missing > 0) |>
+  arrange(desc(pct_missing))
+```
+
+## 3.2 Removing duplicates
+
+```{r clean-data}
+# 1. Remove duplicates
+hotel_main <- hotel_main |> distinct()
+hotel_review <- hotel_review |> distinct()
+
+# The amenity columns
+amenity_cols <- names(hotel_main)[str_starts(names(hotel_main), "amenity_")]
+
+# The most common localities (the others are grouped as "Other")
+top_localities <- hotel_main |>
+  filter(!is.na(locality)) |>
+  count(locality, sort = TRUE) |>
+  slice_head(n = 10) |>
+  pull(locality)
+
+top_localities
+```
+
+## 3.3 Creating new variables
+
+New variables simplify the information (for example "Economy / Moderate / Premium / Luxury" is easier to compare than "$", "$$" and so on), and some capture ideas such as how many amenities a hotel offers. We write one small function so that exactly the same steps are applied to `hotel_main` and to Ramada's row in `hotel_pred`.
+
+```{r new-variables-hotel}
+add_hotel_vars <- function(df) {
+  df |>
+    mutate(
+
+      # missing locality -> "Unknown"
+      locality = replace_na(locality, "Unknown"),
+      
+      # amenity NA -> 0 (not listed), then count how many amenities
+      across(all_of(amenity_cols), ~ replace_na(as.numeric(.x), 0)), amenity_count = rowSums(across(all_of(amenity_cols))),
+      
+      # price category from price_class
+      price_cat = case_when(
+        price_class == "$"    ~ "Economy",
+        price_class == "$$"   ~ "Moderate",
+        price_class == "$$$"  ~ "Premium",
+        price_class == "$$$$" ~ "Luxury",
+        TRUE                  ~ "Unknown"),
+      price_cat = factor(price_cat,
+                         levels = c("Economy", "Moderate", "Premium", "Luxury", "Unknown")),
+
+      # star rating: 0 means unrated
+      star_num = na_if(hotel_class, 0),
+      star_cat = case_when(
+        is.na(star_num) ~ "Unrated",
+        star_num < 3    ~ "1-2.5 Stars",
+        star_num < 4    ~ "3-3.5 Stars",
+        TRUE            ~ "4-5 Stars"),
+      star_cat = factor(star_cat,
+                        levels = c("1-2.5 Stars", "3-3.5 Stars", "4-5 Stars", "Unrated")),
+
+      # size of the hotel
+      room_size = case_when(
+        is.na(room) ~ "Unknown",
+        room <= 10  ~ "Small (1-10)",
+        room <= 30  ~ "Medium (11-30)",
+        TRUE        ~ "Large (31+)"),
+      room_size = factor(room_size,
+                         levels = c("Small (1-10)", "Medium (11-30)", "Large (31+)", "Unknown")),
+
+      # position in the destination ranking (small = better), as a proportion
+      rank_pct = rank_position / rank_denominator,
+
+      # grouped location
+      area = if_else(locality %in% top_localities, locality, "Other")
+    )
+}
+
+hotel_main <- add_hotel_vars(hotel_main)
+hotel_pred <- add_hotel_vars(hotel_pred)
+
+```
+
+
+```{r}
+# One table with all hotels (Ramada included) for benchmarking
+hotel_all <- bind_rows(hotel_main, hotel_pred)
+
+hotel_main |>
+  select(name, price_class, price_cat, hotel_class, star_cat, room, room_size, amenity_count, area) |>
+  head(10)
+```
+
+
+```{r new-variables-review}
+# Variables for the review file
+hotel_review <- hotel_review |>
+  left_join(hotel_all |>
+              select(id, hotel_name = name, locality, category),
+            by = c("hotel_id" = "id")) |>
+  mutate(
+    review_year = year(review_date),
+    responded = if_else(is.na(hotel_response), 0, 1),            # did the hotel reply?
+    word_count  = str_count(text, "\\S+"),                       # length of the review
+    trip_type = replace_na(str_to_title(trip_type), "Not stated"),
+    trip_type = if_else(trip_type == "None", "Not stated", trip_type),
+    origin = case_when(
+      is.na(user_location)  ~ "Unknown",
+      str_detect(user_location, "New Zealand") ~ "New Zealand",
+      str_detect(user_location, "Australia") ~ "Australia",
+      TRUE  ~ "Other countries"),
+    full_text = paste(title, text),                             # title + text for text mining
+    sentiment_group = case_when(
+      rating_overall >= 4 ~ "Positive (4-5)",
+      rating_overall == 3 ~ "Neutral (3)",
+      TRUE                ~ "Negative (1-2)"),
+    # who is who?
+    group = case_when(
+      hotel_id == ramada_id ~ "Ramada",
+      locality == "Hamilton" ~ "Hamilton competitors",
+      TRUE ~ "Other areas")
+  )
+
+# How many reviews per group?
+hotel_review |> count(group)
+```
+
+## 3.4 Defining Competitors
+
+Ramada's competitors are the other hotels located in Hamilton. We use the same competitors for both the hotel-level and review-level comparisons.
+
+```{r define-groups}
+rating_vars <- c("rating_overall", "rating_cleanliness", "rating_location", "rating_room", "rating_service", "rating_sleep", "rating_value")
+
+ramada_row <- hotel_all |> filter(id == ramada_id)
+ham_comp   <- hotel_all |> filter(locality == "Hamilton", id != ramada_id)
+
+comparison_hotel <- tibble(
+  aspect       = rating_vars,
+  Ramada       = unlist(ramada_row[rating_vars]),
+  Hamilton_avg = sapply(ham_comp[rating_vars], mean, na.rm = TRUE)
+)
+
+ramada_reviews <- hotel_review |> filter(group == "Ramada")
+comp_reviews <- hotel_review |> filter(group == "Hamilton competitors")
+
+cat("Hamilton competitor hotels:", nrow(ham_comp), "\n")
+cat("Competitor hotels with reviews:", n_distinct(comp_reviews$hotel_id), "\n")
+```
+
+# 4. Exploratory Data Analysis (EDA)
+
+## 4.1 Understanding Price
+
+Price is what we will predict through Machine Learning, so we must understand its typical level, how spread out it is, and whether there are extreme values.
+
+```{r price-statistics}
+# Overall price
+hotel_main |>
+  filter(!is.na(price)) |>
+  summarise(n = n(), mean = mean(price), median = median(price), sd = sd(price), min = min(price), max = max(price))
+
+# By type of accommodation
+hotel_main$category <- as.factor(hotel_main$category)
+hotel_main |>
+  filter(!is.na(price)) |>
+  group_by(category) |>
+  summarise(n = n(), mean = round(mean(price)), median = median(price), sd = round(sd(price)), min = min(price), max = max(price))
+
+# By price category
+hotel_main |>
+  filter(!is.na(price)) |>
+  group_by(price_cat) |>
+  summarise(n = n(), mean = round(mean(price)), median = median(price))
+
+# By star category
+hotel_main |>
+  filter(!is.na(price)) |>
+  group_by(star_cat) |>
+  summarise(n = n(), mean = round(mean(price)), median = median(price))
+```
+
+```{r price-outliers}
+# Outliers using the IQR rule: values above Q3 + 1.5 x IQR
+price_vals <- hotel_main$price[!is.na(hotel_main$price)]
+q1 <- quantile(price_vals, 0.25)
+q3 <- quantile(price_vals, 0.75)
+upper_fence <- q3 + 1.5 * (q3 - q1)
+
+cat("Upper fence:", round(upper_fence), "\n")
+cat("Hotels above the fence:", sum(price_vals > upper_fence), "\n")
+cat("Hotels above $1000:", sum(price_vals > 1000), "\n")
+
+hotel_main |>
+  filter(!is.na(price)) |>
+  arrange(desc(price)) |>
+  select(name, locality, category, price, room) |>
+  head(10)
+```
+
+## 4.2 Ramada's current price versus Hamilton hotels
+
+```{r price-hamilton}
+ham_price <- ham_comp |> filter(!is.na(price))
+
+ham_price |>
+  summarise(hotels = n(), 
+            mean = round(mean(price)), 
+            median = median(price), 
+            q25 = quantile(price, 0.25), 
+            q75 = quantile(price, 0.75))
+
+cat("Share of Hamilton competitors priced at or below $183.50:", round(mean(ham_price$price <= 183.5) * 100), "%\n")
+
+ham_price |>
+  group_by(category) |>
+  summarise(hotels = n(), median = median(price))
+```
+
+Findings:
+
+* Price is strongly right-skewed: the mean (about $243) is well above the median (about $189), and the standard deviation (about $283) is larger than the mean. Extreme lodges (for example $4,014 and $2,528) pull the average up, so the median is a better "typical" price.
+
+* By type: Hotels have the narrowest spread (standard deviation about $94). Specialty Lodging has the highest mean ($309) but a much lower median ($206), which shows a few very expensive properties. Bed and Breakfasts are in between.
+
+* By price category: the median rises clearly from Economy ($139) to Moderate ($220), Premium ($378) and Luxury ($884).
+
+* By stars: 4-5 star hotels have a median of about $230 compared with about $175 for 3-3.5 star hotels, so star class matters for price.
+
+* Outliers: 33 hotels are above the IQR upper fence of about $403 and 9 are above $1,000. These are luxury lodges, very different from a city hotel such as Ramada, so we exclude hotels above $1,000 when training the model.
+
+* Ramada's position: its current price of $183.50 is close to the overall median, but in Hamilton it is above most competitors. The median Hamilton price is about $148 and Ramada is priced higher than roughly 63% of Hamilton hotels. Only the Hamilton hotels classified as "Moderate" by Tripadvisor have a higher median (about $208), so Ramada is already priced in the upper-middle of its local market.
+
+## 4.3 Graphs and interpretation
+
+### Graph 1: How is price distributed?
+
+A histogram shows the shape of the price data. Right-skewed data (a long tail of expensive hotels) is usually easier to model after a log transformation.
+
+```{r g-price-hist}
+g1 <- hotel_main |>
+  filter(!is.na(price)) |>
+  ggplot(aes(x = price)) +
+  geom_histogram(bins = 40, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = 183.5, colour = "red", linetype = "dashed") +
+  labs(title = "Distribution of price per night (red line = Ramada's $183.50)",
+       x = "Price per night (NZD)", y = "Number of hotels")
+
+g2 <- hotel_main |>
+  filter(!is.na(price)) |>
+  ggplot(aes(x = log(price))) +
+  geom_histogram(bins = 40, fill = "darkorange", colour = "white") +
+  labs(title = "Distribution of log(price)", x = "log(price)", y = "Number of hotels")
+
+grid.arrange(g1, g2, ncol = 2)
+```
+
+**Interpretation:**
+
+* The first histogram shows a long right tail: most hotels charge less than about $400, but a handful charge far more. Skewness (a measure of lopsidedness) is about 8.0 for price.
+
+* The red dashed line shows Ramada's $183.50, which is near the middle of the distribution.
+
+* After taking the log, the shape is much more balanced (skewness falls to about 1.0). 
+
+### Graph 2: Price by type of accommodation and by price category
+
+Boxplots compare the middle and spread of price across groups. We use a log axis because of the long tail.
+
+```{r g-price-box}
+hotel_main |>
+  filter(!is.na(price)) |>
+  ggplot(aes(x = category, y = price, fill = category)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10(labels = dollar) +
+  labs(title = "Price by type of accommodation (log scale)", x = NULL, y = "Price per night")
+
+hotel_main |>
+  filter(!is.na(price)) |>
+  ggplot(aes(x = star_cat, y = price, fill = star_cat)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10(labels = dollar) +
+  labs(title = "Price by star category (log scale)", x = NULL, y = "Price per night")
+```
+
+**Interpretation:**
+
+* By type: the medians for Hotels, Bed and Breakfasts and Specialty Lodging are fairly close (about $178 to $206). Specialty Lodging has the widest spread and the most extreme points, so type alone does not set the price level.
+
+* By stars: price rises with star class. 4-5 star properties have the highest median, 1-2.5 stars the lowest (about $113). The "Unrated" group is a mixture of all kinds of properties and has a wide spread.
+
+* Conclusion: star class is a more useful price signal than accommodation type.
+
+### Graph 3: Does a better rating mean a higher price?
+
+A scatter plot shows the relationship between two numeric variables. If guests rate a hotel higher, can it charge more?
+
+```{r g-price-rating}
+hotel_main |>
+  filter(!is.na(price), !is.na(rating_overall)) |>
+  ggplot(aes(x = rating_overall, y = price, colour = category)) +
+  geom_jitter(alpha = 0.6, width = 0.03) +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE, colour = "black") +
+  scale_y_log10(labels = dollar) +
+  labs(title = "Price versus overall rating (log price axis)",
+       x = "Overall rating (out of 5)", y = "Price per night", colour = "Type")
+```
+
+**Interpretation:**
+
+* The black line slopes upwards: hotels with higher guest ratings tend to charge more.
+
+* However, the points are widely scattered. Hotels with the same rating can have very different prices, so rating explains only part of the price. Other factors such as location, size, season and facilities also matter.
+
+* Ramada's overall rating (3.0) is at the low end of the range. If guests rate a hotel lower, the market supports a lower price, which is relevant to the manager's plan to raise the price.
+
+### Graph 4: Correlation heatmap
+
+Correlation measures how strongly two numeric variables move together (from -1 to +1). The heatmap shows which variables are related to price and which are related to each other.
+
+```{r g-corr, fig.height=7, fig.width=7}
+cor_data <- hotel_main |>
+  select(price, room, photo, review, star_num, rank_pct, amenity_count,
+         all_of(rating_vars))
+
+cor_matrix <- cor(cor_data, use = "pairwise.complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8, addCoef.col = "black", number.cex = 0.6, tl.col = "black")
+```
+
+**Interpretation:**
+
+* Relationships with price are modest. The strongest correlations with price are star class (about 0.35), the room rating (0.23), the overall rating (0.22) and the sleep rating (0.21). Number of reviews (0.00), number of amenities (0.01) and number of rooms (-0.06) show almost no linear relationship with price. (Extreme prices weaken these correlations, which is another reason to treat the biggest outliers carefully.)
+
+* The rating variables are strongly correlated with one another (about 0.78 to 0.86, with location lower at 0.58 to 0.71), and the number of photos and number of reviews are almost the same signal (0.88). They carry overlapping information, so a simple linear model may struggle with them (multi-collinearity). Regularized models (lasso/ridge) and tree-based models cope better
+
+### Graph 5: Where are the expensive hotels?
+
+Location is a classic price driver. We look at average price by area and at a simple map of hotels coloured by price.
+
+```{r g-area}
+hotel_main |>
+  filter(!is.na(price)) |>
+  group_by(area) |>
+  summarise(median_price = median(price), n = n()) |>
+  ggplot(aes(x = reorder(area, median_price), y = median_price)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = paste0("n=", n)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_y_continuous(labels = dollar, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Median price per night by area", x = NULL, y = "Median price")
+
+hotel_main |>
+  filter(!is.na(price), price <= 1000) |>
+  ggplot(aes(x = longitude, y = latitude, colour = price)) +
+  geom_point(alpha = 0.8) +
+  scale_colour_viridis_c(trans = "log10", labels = dollar) +
+  labs(title = "Hotel locations coloured by price", colour = "Price")
+
+# library(ggplot2)
+# library(dplyr)
+# install.packages("sf")
+# library(sf)
+# install.packages("rnaturalearth")
+# library(rnaturalearth)
+# library(scales) # Required for the 'dollar' label function
+# 
+# # 1. Fetch a background world map
+# world_map <- ne_countries(scale = "medium", returnclass = "sf")
+# 
+# # 2. Clean and convert your hotel data to a spatial (sf) object
+# hotel_map_data <- hotel_main |>
+#   filter(!is.na(price), price <= 1000) |>
+#   # Crucial step: Converts lat/long columns into an sf geometry column
+#   st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+# 
+# # 3. Build the map with ggplot2
+# ggplot() +
+#   # Draw the background map layer first
+#   geom_sf(data = world_map, fill = "gray95", color = "lightgray", size = 0.2) +
+#   
+#   # Layer your hotel points on top using geom_sf
+#   geom_sf(data = hotel_map_data, aes(colour = price), alpha = 0.8, size = 1.5) +
+#   
+#   # Format the colour gradient and scales
+#   scale_colour_viridis_c(trans = "log10", labels = label_dollar()) +
+#   
+#   # Automatically frame the map boundaries to your specific data points
+#   coord_sf(xlim = range(hotel_main$longitude, na.rm = TRUE), 
+#            ylim = range(hotel_main$latitude, na.rm = TRUE)) +
+#   
+#   # Labels and themes
+#   labs(
+#     title = "Hotel Locations Coloured by Price",
+#     x = "Longitude", 
+#     y = "Latitude",
+#     colour = "Price"
+#   ) +
+#   theme_minimal()
+
+```
+
+**Interpretation:**
+
+* Hamilton, Ramada's own market, has the lowest median price (about $148, 67 hotels), because it is a large city with many motels and business hotels. Tourist destinations are more expensive: Raglan (about $297, but only 10 hotels), Whitianga (about $213), Taupo (about $203) and Cambridge (about $200).
+
+* The map shows that hotels cluster around towns, and the colour pattern confirms that location is related to price. This is why `area`, latitude and longitude are included in the model.
+
+* Ramada's $183.50 is therefore a relatively high price for Hamilton.
+
+### Graph 6: Ramada versus Hamilton competitors on each aspect
+
+This is the key benchmarking graph. Bars side by side show where Ramada is above or below the Hamilton average.
+
+```{r g-ramada-vs-comp}
+comparison_hotel |>
+  pivot_longer(c(Ramada, Hamilton_avg), names_to = "who", values_to = "score") |>
+  mutate(aspect = str_remove(aspect, "rating_"),
+         who = recode(who, Hamilton_avg = "Hamilton average")) |>
+  ggplot(aes(x = aspect, y = score, fill = who)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(score, 1)), position = position_dodge(width = 0.9),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Ramada" = "firebrick", "Hamilton average" = "grey60")) +
+  coord_cartesian(ylim = c(0, 5.2)) +
+  labs(title = "Ramada vs Hamilton competitors (Tripadvisor hotel-level scores)",
+       x = NULL, y = "Average rating (out of 5)", fill = NULL)
+```
+
+**Interpretation:**
+
+* Ramada (red) is **lower than the Hamilton average (grey) on every aspect except location**.
+* The biggest gaps are overall rating, room, value and sleep. These are the aspects that guests link most closely to the quality of the physical product and the price paid.
+* Location (4.4) is Ramada's strongest score and the main competitive advantage.
+
+### Graph 7: Distribution of star ratings in reviews
+
+**Why are we doing this?**
+An average can hide the detail. Looking at the *share* of 1 to 5 star reviews shows whether guests are polarised or consistently happy.
+
+```{r g-rating-dist}
+hotel_review |>
+  filter(group %in% c("Ramada", "Hamilton competitors")) |>
+  count(group, rating_overall) |>
+  group_by(group) |>
+  mutate(pct = n / sum(n)) |>
+  ggplot(aes(x = factor(rating_overall), y = pct, fill = group)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "grey60")) +
+  labs(title = "Share of reviews by star rating",
+       x = "Overall rating given by the guest", y = "% of reviews", fill = NULL)
+```
+
+**Interpretation:**
+
+* Ramada's review ratings are polarised and skewed to the low end: about 37% of its reviews are 1 or 2 stars (21% give 1 star), compared with about 13% for competitors. Only about 39% of Ramada reviews are 4 or 5 stars, compared with about 73% for competitors.
+
+* Five-star reviews make up 19% of Ramada's reviews but 41% of competitors' reviews.
+
+* This means the low average is not caused by a few angry guests. A large share of guests have a poor experience.
+
+### Graph 8: Has Ramada's rating changed over time?
+
+A trend line shows whether the hotel is improving or getting worse. Years with fewer than 5 reviews are dropped because the average would be unreliable.
+
+```{r g-trend}
+hotel_review |>
+  filter(group %in% c("Ramada", "Hamilton competitors"), review_year >= 2012) |>
+  group_by(group, review_year) |>
+  summarise(avg_rating = mean(rating_overall), n = n(), .groups = "drop") |>
+  filter(n >= 5) |>
+  ggplot(aes(x = review_year, y = avg_rating, colour = group)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(size = n)) +
+  scale_colour_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "grey50")) +
+  labs(title = "Average review rating by year (point size = number of reviews)",
+       x = "Year of review", y = "Average overall rating", colour = NULL, size = "Reviews")
+```
+
+**Interpretation:**
+
+* Ramada is below the competitor average in every year with enough reviews (2013 to 2025). Competitors stay around 3.6 to 4.0, while Ramada ranges from about 2.3 to 3.7.
+
+* There is no clear sustained improvement: for example Ramada averaged about 3.3 in 2019, 3.2 in 2022, 2.7 in 2023 and 3.2 in 2024. The gap narrowed in some years but never closed.
+
+* Be careful with 2025 and 2026: there are only 10 and 8 Ramada reviews, so those averages are unreliable. There are too few Ramada reviews in 2020 to plot, which fits the COVID period.
+
+### Graph 9: Ramada ratings by type of traveler
+
+Different guests want different things (business travellers vs families). Knowing which segment is least satisfied helps target improvements.
+
+```{r g-trip}
+ramada_reviews |>
+  group_by(trip_type) |>
+  summarise(avg_rating = mean(rating_overall), n = n()) |>
+  ggplot(aes(x = reorder(trip_type, avg_rating), y = avg_rating)) +
+  geom_col(fill = "firebrick") +
+  geom_text(aes(label = paste0(round(avg_rating, 2), " (n=", n, ")")), hjust = -0.05, size = 3.5) +
+  coord_flip(ylim = c(0, 5)) +
+  labs(title = "Ramada: average rating by trip type", x = NULL, y = "Average overall rating")
+```
+
+**Interpretation:**
+
+* Business travellers (average about 2.69, 85 reviews), friends (2.58, 26 reviews) and solo travellers (2.77, 13 reviews) give the lowest ratings. Couples (3.21) and families (3.12) are somewhat happier.
+
+* Business guests are the largest identifiable group of reviewers and one of the least satisfied, which matters because they are probably a core market for a city-centre hotel.
+
+* The friends and solo groups are small, so treat those two bars with caution.
+
+### Graph 10: Does the hotel respond to reviews?
+
+Replying to guests (especially unhappy ones) shows that the hotel cares and can protect its reputation. We compare response rates by rating.
+
+```{r g-response}
+hotel_review |>
+  filter(group %in% c("Ramada", "Hamilton competitors")) |>
+  group_by(group, sentiment_group) |>
+  summarise(response_rate = mean(responded), n = n(), .groups = "drop") |>
+  ggplot(aes(x = sentiment_group, y = response_rate, fill = group)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_fill_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "grey60")) +
+  labs(title = "Share of reviews that received a hotel response",
+       x = "Review type", y = "Response rate", fill = NULL)
+```
+
+**Interpretation:**
+
+* Ramada replies to 85% to 87% of reviews whatever the rating. Competitors reply to only about 32% of negative reviews, 49% of neutral reviews and 58% of positive reviews.
+
+* Ramada's responsiveness is a real strength: it shows guests that the management is listening. However, replying does not by itself fix the underlying problems that cause the low ratings.
+
+TSET GIT
+
+
