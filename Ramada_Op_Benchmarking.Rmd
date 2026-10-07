@@ -1576,3 +1576,453 @@ topic_phrases |>
 
 * *Note:* LDA is a statistical model: the topic numbers can change if the model is rerun with a different random seed, but the groups of words stay similar.
 
+# 7. Sentiment analysis for n = 1 to 6
+
+Sentiment analysis measures whether text is positive or negative. We score every n-gram with the **Bing dictionary**, which labels words as positive or negative:
+
+* Score = (number of positive words) - (number of negative words) in the n-gram.
+
+* **Negation:** if the word *before* a sentiment word is a negator ("not", "no", "never", "wasn't", "didn't" and so on), we flip its sign. "Clean" is positive, but "not clean" is negative. For single words (n = 1) negation cannot be detected, because there is no previous word in the window. Longer windows catch more negations.
+
+* An n-gram scoring below 0 is **negative**, above 0 **positive** and exactly 0 **neutral**.
+
+We repeat this for **n = 1 to 6** for Ramada and for the Hamilton competitors, so we can see how the sentiment results change with n, and whether the conclusions are stable.
+
+Limitation: the negation rule is simple and sometimes wrong (for example "couldn't lie in bed"), and the dictionary does not know hotel-specific meanings. We therefore check that the scores agree with the star ratings.
+
+```{r sentiment-setup}
+bing <- get_sentiments("bing")
+positive_words <- bing$word[bing$sentiment == "positive"]
+negative_words <- bing$word[bing$sentiment == "negative"]
+
+negators <- c("not", "no", "never", "nothing", "without", "hardly", "cannot","wasn't", "isn't", "didn't", "don't", "doesn't", "couldn't", "wouldn't", "won't", "can't", "haven't", "hadn't", "hasn't", "weren't", "aren't")
+
+# Score many n-grams at once (n = number of words in each n-gram)
+score_ngrams <- function(ngrams, n, use_negation = TRUE) {
+  w <- str_split_fixed(ngrams, " ", n) 
+  # a table with one column per word
+  s <- matrix(w %in% positive_words, ncol = n) -        
+    # +1 for a positive word
+       matrix(w %in% negative_words, ncol = n)          
+  # -1 for a negative word
+  if (use_negation && n > 1) {
+    after_negator <- cbind(FALSE, matrix(w[, 1:(n - 1)] %in% negators, ncol = n - 1))
+    s <- ifelse(after_negator, -s, s)                   
+    # flip if the previous word is a negator
+  }
+  rowSums(s)
+}
+
+# Readable text: lower case, letters and apostrophes only
+clean_for_ngrams <- function(df) {
+  df |>
+    select(review_id, rating_overall, review_year, full_text) |>
+    mutate(clean = full_text |>
+             str_to_lower() |>
+             str_replace_all("[\u2018\u2019]", "'") |>      # curly quotes -> straight
+             str_replace_all("[^a-z' ]", " ") |>             # keep letters and apostrophes
+             str_squish())
+}
+
+ramada_clean <- clean_for_ngrams(ramada_reviews)
+comp_clean   <- clean_for_ngrams(comp_reviews)
+```
+
+```{r sentiment-loop}
+ramada_scored  <- list()   # all scored n-grams for Ramada (one table for each n)
+review_scores  <- list()   # one row per review for Ramada and competitors
+share_list     <- list()   # share of negative / neutral / positive n-grams
+negation_share <- c()      # % of Ramada n-grams whose score changed because of negation
+
+for (k in 1:6) {
+  # Ramada
+  rg <- ramada_clean |>
+    unnest_tokens(ngram, clean, token = "ngrams", n = k) |>
+    filter(!is.na(ngram))
+  rg$score <- score_ngrams(rg$ngram, k)
+  ramada_scored[[k]] <- rg
+  negation_share[k] <- mean(score_ngrams(rg$ngram, k, use_negation = FALSE) != rg$score) * 100
+
+  # Competitors (only the summaries are kept, to save memory)
+  cg <- comp_clean |>
+    unnest_tokens(ngram, clean, token = "ngrams", n = k) |>
+    filter(!is.na(ngram))
+  cg$score <- score_ngrams(cg$ngram, k)
+
+  summarise_reviews <- function(g, label) {
+    g |>
+      group_by(review_id, rating_overall, review_year) |>
+      summarise(avg_score = mean(score), pct_negative = mean(score < 0) * 100, .groups = "drop") |>
+      mutate(group = label, n = k)
+  }
+  review_scores[[k]] <- bind_rows(summarise_reviews(rg, "Ramada"),
+                                  summarise_reviews(cg, "Hamilton competitors"))
+
+  share_list[[k]] <- bind_rows(
+    tibble(n = k, group = "Ramada",               negative = mean(rg$score < 0) * 100,
+           neutral = mean(rg$score == 0) * 100, positive = mean(rg$score > 0) * 100),
+    tibble(n = k, group = "Hamilton competitors", negative = mean(cg$score < 0) * 100,
+           neutral = mean(cg$score == 0) * 100, positive = mean(cg$score > 0) * 100))
+}
+
+review_scores_all <- bind_rows(review_scores)
+sentiment_share   <- bind_rows(share_list)
+
+cat("Ramada n-grams scored for n = 1 to 6:", paste(comma(sapply(ramada_scored, nrow)), collapse = " | "), "\n")
+```
+
+```{r sentiment-table}
+# One summary table for n = 1 to 6
+sentiment_by_n <- review_scores_all |>
+  group_by(n) |>
+  summarise(
+    rho_with_stars       = cor(avg_score[group == "Ramada"], rating_overall[group == "Ramada"], method = "spearman"),
+    avg_score_ramada     = mean(avg_score[group == "Ramada"]),
+    avg_score_competitor = mean(avg_score[group == "Hamilton competitors"]),
+    p_value = wilcox.test(avg_score[group == "Ramada"], avg_score[group != "Ramada"], exact = FALSE)$p.value
+  ) |>
+  left_join(sentiment_share |> filter(group == "Ramada") |> select(n, ramada_pct_negative = negative), by = "n") |>
+  left_join(sentiment_share |> filter(group != "Ramada") |> select(n, competitor_pct_negative = negative), by = "n") |>
+  mutate(ratio_negative = ramada_pct_negative / competitor_pct_negative,
+         pct_changed_by_negation = negation_share,
+         p_value = format.pval(p_value, digits = 2, eps = 2.2e-16)) |>
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+sentiment_by_n |>
+  select(n, ramada_pct_negative, competitor_pct_negative, ratio_negative,
+         avg_score_ramada, avg_score_competitor, p_value, rho_with_stars, pct_changed_by_negation)
+```
+
+```{r sentiment-share-plot}
+sentiment_share |>
+  ggplot(aes(x = n, y = negative, colour = group)) +
+  geom_line(linewidth = 1) + geom_point(size = 3) +
+  geom_text(aes(label = paste0(round(negative, 1), "%")), vjust = -1, size = 3.2, show.legend = FALSE) +
+  scale_colour_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "grey50")) +
+  scale_x_continuous(breaks = 1:6) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  labs(title = "Share of negative n-grams, for n = 1 to 6",
+       subtitle = "Longer windows contain more words, so more n-grams contain at least one negative word",
+       x = "n (words in the n-gram)", y = "% of n-grams that are negative", colour = NULL)
+
+sentiment_share |>
+  pivot_longer(c(negative, neutral, positive), names_to = "type", values_to = "pct") |>
+  mutate(type = factor(str_to_title(type), levels = c("Negative", "Neutral", "Positive"))) |>
+  ggplot(aes(x = factor(n), y = pct, fill = type)) +
+  geom_col() +
+  facet_wrap(~ group) +
+  scale_fill_manual(values = c("Negative" = "firebrick", "Neutral" = "grey80", "Positive" = "darkgreen")) +
+  labs(title = "Negative, neutral and positive n-grams by n", x = "n (words in the n-gram)",
+       y = "% of n-grams", fill = NULL)
+```
+
+For each review we average the score of its n-grams and compare with the stars the guest gave.
+
+```{r sentiment-validity}
+review_scores_all |>
+  filter(group == "Ramada") |>
+  ggplot(aes(x = factor(rating_overall), y = avg_score, fill = factor(rating_overall))) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ n, scales = "free_y", labeller = label_both) +
+  scale_fill_brewer(palette = "RdYlGn") +
+  labs(title = "Ramada: average n-gram sentiment by star rating, for each n",
+       x = "Star rating given by the guest", y = "Average n-gram score in the review")
+
+ggplot(sentiment_by_n, aes(x = n, y = rho_with_stars)) +
+  geom_line(colour = "steelblue", linewidth = 1) + geom_point(size = 3, colour = "steelblue") +
+  geom_text(aes(label = round(rho_with_stars, 2)), vjust = -1) +
+  scale_x_continuous(breaks = 1:6) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Agreement between text sentiment and star rating",
+       subtitle = "Spearman correlation across Ramada reviews, for each n",
+       x = "n (words in the n-gram)", y = "Spearman correlation")
+```
+
+Examples of 6-grams whose score changed once negators were considered:
+
+```{r sentiment-negation}
+set.seed(123)
+ramada_scored[[6]] |>
+  mutate(score_without_negation = score_ngrams(ngram, 6, use_negation = FALSE)) |>
+  filter(score != score_without_negation) |>
+  slice_sample(n = 8) |>
+  select(ngram, score_without_negation, score_with_negation = score)
+```
+
+**Trend over time (4-grams, a middle value of n):**
+
+```{r sentiment-trend}
+review_scores_all |>
+  filter(n == 4, review_year >= 2012) |>
+  group_by(group, review_year) |>
+  summarise(pct_negative = mean(pct_negative), reviews = n(), .groups = "drop") |>
+  filter(reviews >= 5) |>
+  ggplot(aes(x = review_year, y = pct_negative, colour = group)) +
+  geom_line(linewidth = 1) + geom_point() +
+  scale_colour_manual(values = c("Ramada" = "firebrick", "Hamilton competitors" = "grey50")) +
+  labs(title = "Share of negative 4-grams in reviews, by year",
+       x = "Year of review", y = "Average % of negative 4-grams per review", colour = NULL)
+```
+
+**The strongest negative and positive phrases (n = 2, 4 and 6).** Because n-grams overlap, one sentence creates several nearly identical n-grams, so we keep only the single strongest n-gram from each review.
+
+```{r sentiment-phrases, fig.height=6.5, fig.width=11}
+for (k in c(2, 4, 6)) {
+  g <- ramada_scored[[k]]
+
+  strongest_negative <- g |> group_by(review_id) |> slice_min(score, n = 1, with_ties = FALSE) |>
+    ungroup() |> arrange(score, rating_overall) |> slice_head(n = 35)
+  strongest_positive <- g |> group_by(review_id) |> slice_max(score, n = 1, with_ties = FALSE) |>
+    ungroup() |> arrange(desc(score), desc(rating_overall)) |> slice_head(n = 35)
+
+  # Bar diagram of the top 12 of each kind
+  p <- bind_rows(strongest_negative |> slice_head(n = 12) |> mutate(type = "Most negative"),
+                 strongest_positive |> slice_head(n = 12) |> mutate(type = "Most positive")) |>
+    ggplot(aes(x = reorder_within(ngram, score, type), y = score, fill = type)) +
+    geom_col(show.legend = FALSE) +
+    scale_x_reordered() +
+    coord_flip() +
+    facet_wrap(~ type, scales = "free") +
+    scale_fill_manual(values = c("Most negative" = "firebrick", "Most positive" = "darkgreen")) +
+    labs(title = paste0("Strongest ", k, "-gram in each review (top 12 of each kind)"),
+         x = NULL, y = "Sentiment score")
+  print(p)
+
+  # Word cloud of the top 35 of each kind (size = strength of the sentiment)
+  set.seed(123)
+  par(mfrow = c(1, 2), mar = c(0, 0, 2, 0))
+  wordcloud(strongest_negative$ngram, abs(strongest_negative$score) + 0.5, max.words = 35,
+            scale = c(c(2, 1.6, 1.4, 1.2, 1.1, 1)[k], 0.4), rot.per = 0, random.order = FALSE,
+            colors = brewer.pal(8, "Reds")[4:8])
+  title(paste0("Strongest negative ", k, "-grams"))
+  wordcloud(strongest_positive$ngram, abs(strongest_positive$score) + 0.5, max.words = 35,
+            scale = c(c(2, 1.6, 1.4, 1.2, 1.1, 1)[k], 0.4), rot.per = 0, random.order = FALSE,
+            colors = brewer.pal(8, "Greens")[4:8])
+  title(paste0("Strongest positive ", k, "-grams"))
+  par(mfrow = c(1, 1))
+}
+```
+
+**Interpretation:**
+
+At every n from 1 to 6, Ramada has about 1.5 times (1.54 to 1.56) the share of negative n-grams of the competitors (for example 14.6% vs 9.4% at n = 6, and 3.1% vs 2.0% at n = 1). 
+
+Ramada's average score is roughly half the competitors' at each n, and the Wilcoxon test gives p < 0.001 every time. The finding is robust.
+
+A longer window contains more words, so it is more likely to contain at least one negative (or positive) word. This is why the share of negative n-grams grows from about 3% to about 15%. Compare Ramada and competitors at the same n, never across different values of n.
+
+The correlation between a review's average n-gram score and its stars is 0.75 for single words and 0.77 for every n from 2 to 6. The boxplots rise steadily from 1 to 5 stars for every n. So n-grams (which can capture some negation) are slightly better than single words, but there is no gain beyond n = 2.
+
+* **Negation:** the share of n-grams whose score changes because of a negator grows from 0% at n = 1 to 0.5% (n = 2) and 2.3% (n = 6). The examples show the effect: "if service has not improved some" and "wasn't warm" become negative, "no problems getting sorted" and "no complaints" become positive. The rule can misfire occasionally, but it fixes real errors.
+
+* **Over time (4-grams):** Ramada's share of negative phrases is higher than the competitors' in every year from 2014 onward (about 7% to 15% for Ramada versus about 6% to 9% for competitors). There is no sign of catching up.
+
+* **The strongest negative phrases, at every n,** are about smells (musty smell, bad smell, awful damp musty smell, smelled stale), noise (loud noise, very loud repetitive noise), tired, dirty rooms** (tired noisy, worn dirty, shabby smelly noisy) and poor service and value (useless and rude, a pig overpriced clumsy). 
+
+* **The strongest positive phrases** are about clean, tidy, spacious, comfortable rooms and friendly, helpful staff (perfect clean comfortable helpful, super friendly and helpful, good location clean spacious).
+
+* For counting repeated phrases, n = 2 to 4 works best (frequent enough to be reliable, long enough to give context). For sentiment, n = 2 to 4 gives the readable context and the same accuracy as longer windows. n = 5 and 6 are useful mainly for reading complete expressions.
+
+* **Summary:** the same themes (rooms and bathrooms, smell, noise, parking and access, service, and value for money) appear at every n, in the topic analysis and in the sentiment analysis, so they are reliable findings. Guests also complain about
+
+**extra charges**: the repeated phrases extra cost (6 reviews, average 2.3), pay for park and pay for wifi (both rated about 1.5 to 2.7).
+
+## Which aspects do guests talk about? (Aspect analysis)
+
+**Why are we doing this?**
+To turn text into clear business topics, we search each review for keywords linked to an aspect (for example "noise", "loud" for *Noise & sleep*). For every aspect we compute how often guests mention it and what overall rating those reviews give, for Ramada and for competitors. If Ramada's reviews that mention an aspect are much lower than the competitors' reviews on the same aspect, that aspect is a **weakness**.
+
+```{r aspects}
+aspects <- list(
+  "Room & bed"          = "room|bed|mattress|pillow|bathroom|shower|carpet",
+  "Cleanliness"         = "clean|dirty|stain|smell|dust|mould|mold",
+  "Noise & sleep"       = "noise|noisy|loud|sleep|slept|quiet|disturb",
+  "Staff & service"     = "staff|service|reception|friendly|helpful|manager|rude",
+  "Location"            = "location|central|walk|close to|restaurant|shops",
+  "Parking"             = "parking|car park|carpark",
+  "Value & price"       = "price|value|cheap|expensive|money|cost|worth",
+  "Facilities & breakfast" = "wifi|wi-fi|pool|gym|laundry|kitchen|lift|elevator|heating|air con|breakfast"
+)
+
+aspect_table <- map_dfr(names(aspects), function(a) {
+  pattern <- aspects[[a]]
+  r_mention <- str_detect(tolower(ramada_reviews$full_text), pattern)
+  c_mention <- str_detect(tolower(comp_reviews$full_text), pattern)
+  tibble(
+    aspect = a,
+    Ramada_pct_mention = round(mean(r_mention) * 100, 1),
+    Comp_pct_mention   = round(mean(c_mention) * 100, 1),
+    Ramada_rating      = round(mean(ramada_reviews$rating_overall[r_mention]), 2),
+    Comp_rating        = round(mean(comp_reviews$rating_overall[c_mention]), 2),
+    gap                = round(Ramada_rating - Comp_rating, 2)
+  )
+})
+
+aspect_table
+```
+
+```{r aspect-plot}
+aspect_table |>
+  ggplot(aes(x = reorder(aspect, gap), y = gap, fill = gap > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "darkgreen", "FALSE" = "firebrick")) +
+  labs(title = "Rating gap: Ramada minus competitors, for reviews mentioning each aspect",
+       subtitle = "Negative = Ramada guests who mention this aspect are less happy than competitors' guests",
+       x = NULL, y = "Difference in average overall rating")
+```
+
+**Interpretation:**
+
+* **What guests talk about:** *Room & bed* (86%), *Staff & service* (60%), *Location* (61%) and *Cleanliness* (52%) are the most discussed topics. Compared with competitors, Ramada guests talk **much more about parking (42% vs 21%)** and location (61% vs 49%), and **much less about facilities and breakfast (30% vs 49%)**, which suggests Ramada offers or promotes fewer facilities.
+* **How happy those guests are:** Ramada's reviews are lower than competitors' for every aspect. The biggest gaps are **Noise & sleep (-1.2; Ramada average 2.61, the lowest of all aspects)**, **Facilities (-1.1)**, **Cleanliness (-0.96)**, **Room & bed (-0.95)** and **Parking (-0.84)**.
+* The smallest gaps are for **Value & price (-0.68)** and **Location (-0.74)**, and the reviews that mention location and staff are Ramada's happiest ones (average ratings of about 3.4 and 3.2).
+* *Caution:* because Ramada's overall rating is lower, some gap is expected for every aspect. The value of this analysis is in the **ranking**: noise and sleep, facilities, cleanliness and rooms are where the unhappiness is concentrated. A keyword match also does not tell us if the comment was positive or negative.
+
+## Logistic regression: what makes a review negative?
+
+**Why are we doing this?**
+Linear regression predicts a *number*. **Logistic regression** predicts a *yes/no outcome*; here, "is this review negative (1 or 2 stars)?". The model returns **odds ratios**:
+
+* an odds ratio **above 1** means the factor makes a negative review *more* likely,
+* **below 1** means *less* likely,
+* **1** means no effect.
+
+We use the aspect keywords from the previous section (does the review mention noise, location, parking and so on?), the type of traveller and the length of the review. This tells us which topics are linked to unhappy guests, while holding the other factors constant.
+
+```{r logistic-prepare}
+# Short names for the 8 aspects (same order as the 'aspects' list above)
+aspect_keys <- c("room", "clean", "noise", "staff", "location", "parking", "value", "facilities")
+
+add_flags <- function(df) {
+  for (i in seq_along(aspects)) {
+    df[[paste0("m_", aspect_keys[i])]] <- as.numeric(str_detect(tolower(df$full_text), aspects[[i]]))
+  }
+  df |> mutate(negative = as.numeric(rating_overall <= 2),     # 1 = negative review
+                log_words = log(pmax(word_count, 1)))           # review length (log scale)
+}
+
+ramada_logit_data <- add_flags(ramada_reviews) |>
+  mutate(trip_type = relevel(factor(trip_type), ref = "Not stated"))
+
+cat("Share of Ramada reviews that are negative:", round(mean(ramada_logit_data$negative) * 100, 1), "%\n")
+
+# Train / test split (80 / 20)
+set.seed(123)
+logit_index <- createDataPartition(ramada_logit_data$negative, p = 0.8, list = FALSE)
+logit_train <- ramada_logit_data[logit_index, ]
+logit_test  <- ramada_logit_data[-logit_index, ]
+```
+
+```{r logistic-fit}
+logit_model <- glm(negative ~ m_room + m_clean + m_noise + m_staff + m_location +
+                     m_parking + m_value + m_facilities + trip_type + log_words,
+                   data = logit_train, family = binomial)
+
+summary(logit_model)
+```
+
+```{r logistic-or}
+# Odds ratios with 95% confidence intervals
+or_table <- tibble(
+  term       = names(coef(logit_model)),
+  odds_ratio = exp(coef(logit_model)),
+  low        = exp(confint.default(logit_model)[, 1]),
+  high       = exp(confint.default(logit_model)[, 2]),
+  p_value    = summary(logit_model)$coefficients[, 4]
+) |>
+  filter(term != "(Intercept)")
+
+or_table |> mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+ggplot(or_table, aes(x = odds_ratio, y = reorder(term, odds_ratio), colour = p_value < 0.05)) +
+  geom_segment(aes(x = low, xend = high, yend = term)) +
+  geom_point(size = 2.5) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  scale_colour_manual(values = c("TRUE" = "firebrick", "FALSE" = "grey50"),
+                      labels = c("TRUE" = "p < 0.05", "FALSE" = "not significant")) +
+  labs(title = "Odds ratios for a negative (1-2 star) Ramada review",
+       subtitle = "Right of the dashed line = more likely negative; left = less likely",
+       x = "Odds ratio (log scale)", y = NULL, colour = NULL)
+```
+
+**How good are the predictions?** We classify a review as negative when the predicted probability is above 0.5 and compare with reality on the test reviews.
+
+```{r logistic-test}
+prob  <- predict(logit_model, logit_test, type = "response")
+pred_class   <- factor(if_else(prob > 0.5, "Negative", "Not negative"), levels = c("Negative", "Not negative"))
+actual_class <- factor(if_else(logit_test$negative == 1, "Negative", "Not negative"), levels = c("Negative", "Not negative"))
+
+table(Predicted = pred_class, Actual = actual_class)
+
+cm <- confusionMatrix(pred_class, actual_class, positive = "Negative")
+round(cm$overall["Accuracy"], 3)
+round(cm$byClass[c("Sensitivity", "Specificity")], 3)
+```
+
+**Is Ramada itself a risk factor?** We now combine Ramada and competitor reviews and add a Ramada indicator, to see how much more likely a Ramada review is negative *after* allowing for topics and review length.
+
+```{r logistic-combined}
+combined_data <- add_flags(bind_rows(ramada_reviews, comp_reviews)) |>
+  mutate(is_ramada = as.numeric(group == "Ramada"))
+
+logit_combined <- glm(negative ~ is_ramada + m_room + m_clean + m_noise + m_staff + m_location +
+                        m_parking + m_value + m_facilities + log_words,
+                      data = combined_data, family = binomial)
+
+round(exp(cbind(odds_ratio = coef(logit_combined), confint.default(logit_combined))), 2)
+```
+
+**Interpretation:**
+
+**Model for Ramada reviews only (280 training reviews)**
+
+* About **37%** of Ramada reviews are negative (1-2 stars).
+* **Mentioning location** lowers the odds of a negative review by about **75%** (odds ratio 0.25, 95% CI 0.14 to 0.45, p < 0.001). Location is a source of satisfaction.
+* **Mentioning staff or service** words lowers the odds by about **59%** (odds ratio 0.41, p = 0.004). This agrees with the keyword analysis: friendly, helpful staff appear in happy reviews.
+* **Couples** have about 70% lower odds of a negative review than reviewers who did not state a trip type (odds ratio 0.30, p = 0.01). Business travellers are about the same as the reference group.
+* **Longer reviews are much more likely to be negative** (odds ratio 3.5 per one-unit increase in log words, p < 0.001; doubling the length multiplies the odds by about 2.4). Unhappy guests write more.
+* **Noise and sleep words** raise the odds of a negative review by about 69% (odds ratio 1.69), but this is **not significant at 5%** (p = 0.099) in this small sample, so it is only a hint. Room, cleanliness, parking, value and facilities words are not significant individually: a keyword can be mentioned positively or negatively ("clean room" or "dirty room"), and the sample is small.
+* **Predictive performance:** on the 69 test reviews, accuracy is about **74%** (it catches 64% of the truly negative reviews and correctly clears 80% of the others). This is acceptable but not strong, so we use the model to *understand* what drives negative reviews, not to predict them.
+
+**Combined model (Ramada plus competitors)**
+
+* The Ramada indicator has an odds ratio of about **6.3** (95% CI 4.8 to 8.2). Even for reviews of the same length that mention the same topics, a Ramada review has roughly **six times the odds** of being negative compared with a competitor review. The problem is not limited to a single topic: the overall guest experience is worse.
+
+## Summary: Ramada's strengths and weaknesses
+
+```{r sw-summary}
+strength_weakness <- wilcoxon_table |>
+  mutate(rating = str_remove(rating, "rating_")) |>
+  arrange(difference)
+
+strength_weakness
+```
+
+**Strengths (keep and promote)**
+
+| Strength | Evidence |
+|---|---|
+| **Location** | Rating 4.39, the same as competitors and ranked 28th of 71 in Hamilton. Mentioned in 61% of reviews; repeated phrases such as "central location", "walk distance" and "right in the middle of town"; mentioning location cuts the odds of a negative review by about 75%. |
+| **Responsiveness** | Replies to about 86% of reviews vs 54% for competitors (and 86% of negative reviews vs 32%). |
+| **Friendly, helpful staff (when it works)** | "Staff be friendly and helpful" is repeated in 9 reviews at n = 5 (average rating 4.1); mentioning staff cuts the odds of a negative review by about 59%. The service rating (3.59) is still below competitors. |
+| **Clean, comfortable rooms for happy guests** | Repeated phrases "clean and tidy", "room be clean and tidy" and "bed be comfortable"; the clean/staff/location topic has an average rating of 3.96 and only 12% negative reviews. |
+
+**Weaknesses (fix first)**
+
+| Weakness | Evidence |
+|---|---|
+| **Rooms and bathrooms** | Room rating 3.19 vs 4.00 (p < 0.001). The topic *bed, bathroom, shower, door, smell, window, noise* covers 29% of reviews, with an average rating of 1.99 and 71% negative. Phrases: "step into the shower" (average rating 2.0), "bathroom be ridiculously small", "hole in the wall". |
+| **Smells and cleanliness** | Cleanliness 3.67 vs 4.26; at every n the strongest negative phrases are about musty, damp, stale and cigarette smells. |
+| **Noise and sleep** | Sleep rating 3.42 vs 4.10; the *Noise & sleep* aspect has the lowest rating (2.61) and the biggest gap (-1.2); phrases "on the main street" (2.6), "room be on the main street", "very loud repetitive noise". |
+| **Value for money and extra charges** | Value rating 3.25 vs 4.06 (p < 0.001) while the price is above most Hamilton competitors; phrases "extra cost" (6 reviews, average 2.3), "pay for park", "to pay for wifi" and "don't waste your money". |
+| **Parking and access** | Mentioned in 42% of reviews vs 21% for competitors; the phrase grows from "car park" to "get from the car park to" (average about 2.3 to 2.7); the parking, arrival and reception topic has 28% negative reviews. |
+| **Building layout** | "Rabbit warren" (9 reviews at n = 2, average 2.4) and "bit of a maze" appear in the repeated phrases. |
+| **Service consistency and problem handling** | Service 3.59 vs 4.17; "the front desk" (average 2.4), "customer service"; strongest negative phrases include "useless and rude"; the booking and check-in topic has 36% negative reviews. |
+| **More negative wording, and no improvement over time** | Ramada has about 1.5 times the competitors' share of negative n-grams at every n, and the share has been higher every year since 2014; ratings were 2.99 (up to 2019) vs 3.04 (2022 onward), p = 0.68. |
+
+---
+
+
+
