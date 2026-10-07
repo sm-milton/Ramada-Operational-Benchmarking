@@ -50,7 +50,7 @@ pacman::p_load(readr, dplyr, tidyr, stringr, lubridate, purrr, ggplot2, gridExtr
 pacman::p_load(tidytext, textstem, wordcloud, textdata, topicmodels)
 pacman::p_load(DescTools, skimr, finalfit, rstatix, huxtable, jtools)
 pacman::p_load(knitr, easystats, gtsummary, gt, scales)
-
+pacman::p_load(SnowballC, textstem)
 ```
 
 # 2. Data Import and Initial Inspection
@@ -1111,6 +1111,468 @@ ggplot(cluster_data, aes(x = rating_overall, y = price, colour = cluster, size =
 
 * Ramada charges almost the price of the top group for the satisfaction level of its peer group. This explains its weak value-for-money score and is another reason not to raise the price.
 
+# 5. Strengths and Weaknesses of Ramada from Reviews
 
+In this phase we mine the written reviews using n-gramS, trying n = 1, 2, 3, 4, 5 and 6 one after the other. Star ratings tell us how guests felt; the words tell us why.
 
+An n-gram is a window of n consecutive words that slides through a review one word at a time. For the sentence "the bathroom door would not close properly":
+
+Small n (1 or 2): the same words and phrases appear in many reviews, so counts are reliable, but there is little context.
+
+* Large n (5 or 6): the phrase carries a lot of context, including words like "not" that change the meaning, but it is almost never written the same way twice.
+
+We go gradually from n = 1 to n = 6 and, at each step, check what we gain and what we lose.
+
+**Steps in this phase**
+
+1. Prepare the text and split it into words
+2. Stemming and lemmatization
+3. Build the n-grams for n = 1 to 6 and measure how often they repeat
+4. Keep the meaningful n-grams, then draw bar diagrams for n = 1 to 6
+5. Draw word clouds for n = 1 to 6
+6. Topic analysis (LDA), with phrases for each topic at n = 2 to 6
+7. Sentiment analysis for n = 1 to 6
+8. Aspect analysis, logistic regression and a summary of strengths and weaknesses
+
+## 5.1 Preparing the review text
+
+Computers cannot read sentences, so we first split each review into single words (tokenisation). `unnest_tokens()` also converts the words to lower case and removes punctuation. We keep only real words (letters and apostrophes, so that "wasn't" stays one word), because the word "not" matters for sentiment.
+
+We do not remove stop words (such as "the", "and", "was") at this stage. Inside an n-gram these small words keep the phrase readable. Later, we keep only the n-grams that also contain meaningful words.
+
+```{r text-prep}
+# Words that carry little meaning here (used later for topic analysis only)
+custom_stop <- c("hotel", "ramada", "wyndham", "hamilton", "stay", "stayed", "staying",
+                 "night", "nights", "nz", "city", "centre", "center", "sudima")
+
+# One row per word, in the original order of each review
+tokens_words <- ramada_reviews |>
+  select(review_id, rating_overall, sentiment_group, full_text) |>
+  unnest_tokens(word, full_text) |>
+  filter(str_detect(word, "^[a-z']+$"))        # keep real words only
+
+cat("Ramada reviews:", n_distinct(tokens_words$review_id), "\n")
+cat("Total words:", nrow(tokens_words), "\n")
+cat("Different words:", n_distinct(tokens_words$word), "\n")
+cat("Average words per review:", round(nrow(tokens_words) / n_distinct(tokens_words$review_id)), "\n")
+
+# The first 15 words of the first review
+head(tokens_words$word, 15)
+```
+
+## 5.2 Stemming and lemmatization
+
+Guests write "room", "rooms", "stay", "stayed", "staying" and so on. For a computer these are different words, so identical phrases written with different word forms would not match. We reduce each word to a common base form before building the n-grams.
+
+* **Stemming** chops the end off a word using simple rules. It is fast, but the result may not be a real word.
+
+* **Lemmatization** uses a dictionary to return the proper base word ("rooms" becomes "room", "stayed" becomes "stay", "was" becomes "be"). It sometimes gives odd results for words that look like another word (for example "bit" can become "bite").
+
+```{r stem-lemma-demo}
+demo_words <- c("rooms", "cleaned", "cleaning", "stayed", "staying", "was", "were","friendly", "noisy", "better", "walking")
+
+tibble(original = demo_words,
+       stem     = wordStem(demo_words),
+       lemma    = lemmatize_words(demo_words))
+```
+
+```{r stem-lemma-apply}
+# Add the stem and the lemma of every word
+tokens_words <- tokens_words |>
+  mutate(stem  = wordStem(word),
+         lemma = lemmatize_words(word))
+
+# How much smaller does the vocabulary become?
+vocab_size <- tibble(
+  version = c("Original words", "After stemming", "After lemmatization"),
+  different_words = c(n_distinct(tokens_words$word),
+                      n_distinct(tokens_words$stem),
+                      n_distinct(tokens_words$lemma))
+) |>
+  mutate(reduction_pct = round((1 - different_words / first(different_words)) * 100, 1))
+
+vocab_size
+```
+
+```{r vocab-plot}
+ggplot(vocab_size, aes(x = factor(version, levels = version), y = different_words)) +
+  geom_col(fill = "firebrick") +
+  geom_text(aes(label = paste0(different_words, " (-", reduction_pct, "%)")), vjust = -0.3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Stemming and lemmatization shrink the vocabulary",
+       x = NULL, y = "Number of different words")
+```
+
+**Interpretation:**
+
+* Ramada's 349 reviews contain about 32,600 words (about 93 per review), but only 3,338 different word forms.
+
+* Stemming reduces the vocabulary by about 23% (to 2,581) and lemmatization by about 22% (to 2,608). Both group different forms of the same word, so identical ideas are counted together.
+
+* Stems are hard to read ("stayed" becomes "stai", "was" becomes "wa", "friendly" becomes "friendli"). Lemmas are real words ("stayed" becomes "stay", and "was" and "were" both become "be", "better" becomes "good"). For readable charts we therefore use the lemmatized text.
+
+* Lemmatization is not perfect: it can give odd results such as "bit" becoming "bite" or "bubbles" becoming "bubble". Because "was", "is" and "were" all become "be", you will see phrases such as "the room be clean and tidy". Read "be" as "was/is/were".
+
+## 5.3 Building the n-grams for n = 1 to 6
+
+We rebuild each review as one string of words in three versions (original, stemmed and lemmatized) and then slide a window of n words through it with `unnest_tokens(token = "ngrams", n = n)`. Windows never cross from one review into the next. A review shorter than n words produces no n-gram.
+
+For every n and every version we count:
+
+* Different n-grams: how many distinct word sequences there are, and 
+
+* repeated n-grams: how many appear in two or more different reviews. We count each n-gram once per review, so a guest who repeats a phrase in the same review does not inflate the count.
+
+```{r build-ngrams}
+ngram_names <- c("single words (1-grams)", "2-grams", "3-grams", "4-grams", "5-grams", "6-grams")
+
+# One text per review for each version of the words
+review_texts <- tokens_words |>
+  group_by(review_id, rating_overall, sentiment_group) |>
+  summarise(text_original = paste(word,  collapse = " "),
+            text_stem     = paste(stem,  collapse = " "),
+            text_lemma    = paste(lemma, collapse = " "),
+            .groups = "drop")
+
+# Count different and repeated n-grams for one value of n and one version of the words
+count_repeats <- function(n, version) {
+  text_col <- c(original = "text_original", stem = "text_stem", lemma = "text_lemma")[[version]]
+
+  grams <- review_texts |>
+    select(review_id, text = all_of(text_col)) |>
+    unnest_tokens(ngram, text, token = "ngrams", n = n) |>
+    filter(!is.na(ngram))
+
+  per_gram <- grams |>
+    group_by(ngram) |>
+    summarise(n_reviews = n_distinct(review_id), .groups = "drop")
+
+  tibble(n = n, version = version, total = nrow(grams),
+         different = nrow(per_gram), repeated = sum(per_gram$n_reviews >= 2))
+}
+
+# Run it for n = 1 to 6 and the three versions
+ngram_summary <- expand_grid(n = 1:6, version = c("original", "stem", "lemma")) |>
+  pmap_dfr(count_repeats)
+
+# One tidy table: counts for the lemmatized version, and the % of n-grams that repeat for each version
+repeat_pct <- ngram_summary |>
+  mutate(pct_repeated = round(repeated / different * 100, 2)) |>
+  select(n, version, pct_repeated) |>
+  pivot_wider(names_from = version, values_from = pct_repeated, names_prefix = "pct_repeated_")
+
+repeat_table <- ngram_summary |>
+  filter(version == "lemma") |>
+  select(n, total_ngrams = total, different_ngrams = different, repeated_lemma = repeated) |>
+  left_join(repeat_pct, by = "n") |>
+  select(n, total_ngrams, different_ngrams, repeated_lemma,
+         pct_repeated_original, pct_repeated_stem, pct_repeated_lemma) |>
+  mutate(pct_repeated = pct_repeated_lemma)        # used by the plot below
+
+repeat_table |> select(-pct_repeated)
+```
+
+```{r repeat-plot}
+ggplot(repeat_table, aes(x = n, y = pct_repeated)) +
+  geom_line(colour = "firebrick", linewidth = 1) +
+  geom_point(size = 3, colour = "firebrick") +
+  geom_text(aes(label = paste0(pct_repeated, "%")), vjust = -1) +
+  scale_x_continuous(breaks = 1:6) +
+  scale_y_log10(expand = expansion(mult = c(0.1, 0.4))) +
+  labs(title = "The longer the n-gram, the fewer repeats",
+       subtitle = "% of different lemmatized n-grams that appear in 2 or more reviews (log scale)",
+       x = "n (number of words in the n-gram)", y = "% of n-grams that repeat (log scale)")
+```
+
+**Interpretation:**
+
+* Repetition falls quickly as n grows.Of the different lemmatized n-grams, 53.9% of single words appear in two or more reviews, but only 22.1% of 2-grams, 7.8% of 3-grams, 2.2% of 4-grams, 0.6% of 5-grams and just 0.18% of 6-grams. Each extra word cuts the repeat rate by a factor of roughly 2.5 to 3.7. At n = 6, 54 of 30,782 different 6-grams repeat.
+
+* The number of different n-grams explodes: from about 2,600 single words to about 30,800 different 6-grams from roughly the same amount of text (about 31,000 to 32,000 windows for every n). By n = 6 almost every window is unique.
+
+* Stemming and lemmatization always help, and help more as n grows. Compared with the original words, lemmatization raises the repeat rate by about 8% for single words, 11% for 2-grams, 17% for 3-grams, 21% for 4-grams, 25% for 5-grams and 29% for 6-grams (for example 43 to 54 repeated 6-grams). Stemming gives similar gains. Long phrases are the most sensitive to word forms ("was friendly" and "were friendly" only match after lemmatization).
+
+* The trade-off in one sentence: small n gives reliable counts but little context; large n gives rich context but only a few repeated phrases. That is why we look at all six values and combine them with topic and sentiment analysis.
+
+## 5.4 Keeping the meaningful n-grams
+
+Many n-grams contain only small words ("and the", "was in a"). These are called stop words. Stop words are useful inside a phrase because they make it readable, but an n-gram made mostly of stop words says nothing. We therefore use one simple rule at every n:
+
+> Keep an n-gram only if it contains **at least two meaningful (non-stop) words**. For single words (n = 1), the word itself must be meaningful.
+
+So "car park" and "friendly and helpful" are kept, while "and the" and "in the" are dropped. We use the lemmatized text, count each n-gram once per review, and also record the average star rating of the reviews that contain it (to see whether the phrase belongs to happy or unhappy guests).
+
+```{r meaningful-ngrams}
+# Stop words: the standard list plus our own hotel-specific words
+stop_set <- unique(c(stop_words$word, custom_stop))
+
+gram_tables <- map(1:6, function(k) {
+  review_texts |>
+    select(review_id, rating_overall, text_lemma) |>
+    unnest_tokens(ngram, text_lemma, token = "ngrams", n = k) |>
+    filter(!is.na(ngram)) |>
+    distinct(review_id, ngram, rating_overall) |>         # count once per review
+    group_by(ngram) |>
+    summarise(n_reviews = n(), avg_rating = round(mean(rating_overall), 2), .groups = "drop") |>
+    # how many words in the n-gram are meaningful?
+    mutate(meaningful_words = rowSums(matrix(!(str_split_fixed(ngram, " ", k) %in% stop_set), ncol = k))) |>
+    filter(meaningful_words >= min(k, 2)) |>
+    arrange(desc(n_reviews), avg_rating)
+})
+
+# Summary for n = 1 to 6
+meaningful_summary <- map_dfr(1:6, function(k) {
+  tb <- gram_tables[[k]]
+  tibble(n = k,
+         different_meaningful = nrow(tb),
+         repeated_in_2_or_more_reviews = sum(tb$n_reviews >= 2),
+         most_common = tb$ngram[1],
+         in_how_many_reviews = tb$n_reviews[1])
+})
+
+meaningful_summary
+```
+
+```{r top-ngram-tables}
+# The top 10 repeated meaningful n-grams for each n, side by side
+map_dfr(1:6, function(k) {
+  gram_tables[[k]] |>
+    filter(n_reviews >= 2) |>
+    slice_head(n = 10) |>
+    transmute(n = k, rank = row_number(), ngram, reviews = n_reviews, avg_rating)
+}) |>
+  print(n = Inf)
+```
+
+## 5.5 Bar diagrams for n = 1 to 6
+
+A bar diagram shows the most repeated n-grams. Each bar is the number of different reviews that contain the n-gram. The colour shows the mood of the guests who used it: 
+
+green = happy guests (average rating 3.5 or more), 
+red   = unhappy guests (average rating 2.5 or less), 
+grey  = nutral. 
+
+We draw one diagram for each n, from single words up to 6-grams, so you can see how the picture changes as the phrases get longer.
+
+```{r bar-diagrams, fig.height=5.5, fig.width=9}
+mood_colours <- c("Happy guests (avg rating 3.5+)"        = "darkgreen",
+                  "Unhappy guests (avg rating 2.5 or less)" = "firebrick",
+                  "nutral"                                  = "grey60")
+
+add_mood <- function(tb) {
+  tb |> mutate(mood = case_when(avg_rating >= 3.5 ~ "Happy guests (avg rating 3.5+)",
+                                avg_rating <= 2.5 ~ "Unhappy guests (avg rating 2.5 or less)",
+                                TRUE              ~ "nutral"))
+}
+
+for (k in 1:6) {
+  p <- gram_tables[[k]] |>
+    filter(n_reviews >= 2) |>
+    add_mood() |>
+    slice_head(n = 15) |>
+    ggplot(aes(x = reorder(ngram, n_reviews), y = n_reviews, fill = mood)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = mood_colours) +
+    labs(title = paste0("Top repeated ", ngram_names[k], " (lemmatized, meaningful)"),
+         x = NULL, y = "Number of reviews containing it", fill = NULL) +
+    theme(legend.position = "bottom")
+  print(p)
+}
+```
+
+**Interpretation:**
+
+* n = 1 (single words): the most widespread words are *park* (138 reviews), *staff* (130), *clean* (128), *location* (127), *bed* (105), *bathroom* (93), *restaurant* (81), *book* (75) and *shower* (74). The average rating of the reviews tells us more than the count: *bathroom* (2.5), *shower* (2.6), *bed* (2.7) and *book* (2.8) go with unhappy guests, while *friendly* (3.7) and *restaurant* (3.5) go with happier ones. Words like *staff*, *park* and *location* are used by both happy and unhappy guests, so a single word cannot tell us which.
+
+* **n = 2:** pairs add the missing context: **car park** (36 reviews, average rating 3.1), **central location** (22, 3.8), **main street** (16, 3.3), **front desk** (14, 2.9), **walk distance** (14, 4.1), **air condition** (13, 2.5), **customer service** (11, 3.1), **friendly staff** (11, 4.0) and **rabbit warren** (9, 2.4). Now the phrases separate: central location, walking distance and friendly staff are green; air conditioning and the rabbit-warren layout are red.
+
+* **n = 3:** *friendly and helpful* (17 reviews), *staff be friendly* (15), *clean and tidy* (13) and *restaurant and bar* (10) are green, while *the front desk* (2.4), *the car park* (2.7) and *the main street* (2.8) are the unhappy ones.
+
+* **n = 4:** *staff be friendly and* (11 reviews) and *be friendly and helpful* (10) are the most repeated, followed by unhappy phrases such as *on the main street* (2.6), ***from the car park*** (2.3) and ***step into the shower*** (2.0).
+
+* **n = 5 and n = 6:** only 59 and 23 meaningful phrases repeat, but they read like real sentences: *staff be friendly and helpful* (9 reviews, 4.1), *room be clean and tidy*, *have to pay for park* (2.7), *get from the car park to* (2.7), *place be like a rabbit warren* (2.0), *room be on the main street* (2.5) and *step to get into the shower* (2.5).
+
+* **Following one theme as n grows:** the same complaint becomes more specific. *car park* (36 reviews) becomes *from the car park* (6) and then *get from the car park to* (3): guests complain about **getting from the car park to the hotel**. *shower* (74) becomes *step into the shower* (4) and then *step to get into the shower* (2): the problem is the **high step into the shower**. The positive theme follows the same path: *friendly staff* becomes *staff be friendly and helpful*.
+
+* Remember that "be" is the lemma of "was/is/were", so "staff be friendly" means "staff were friendly".
+
+## 5.6 Word clouds for n = 1 to 6
+
+A word cloud shows the repeated n-grams at a glance: bigger text means the n-gram appears in more reviews. The colours are the same as in the bar diagrams (green = happy guests, red = unhappy guests, grey = nutral). Longer n-grams need smaller text to fit, so we show fewer phrases as n grows.
+
+```{r wordclouds-ngrams, fig.height=6.5, fig.width=10}
+cloud_max   <- c(100, 80, 60, 50, 40, 30)
+cloud_scale <- list(c(4, 0.7), c(3, 0.6), c(2.2, 0.5), c(1.6, 0.4), c(1.3, 0.4), c(1.1, 0.4))
+
+for (k in 1:6) {
+  cd <- gram_tables[[k]] |>
+    filter(n_reviews >= 2) |>
+    add_mood() |>
+    arrange(desc(n_reviews), avg_rating) |>
+    slice_head(n = cloud_max[k]) |>
+    mutate(colour = case_when(str_detect(mood, "^Happy") ~ "darkgreen",
+                              str_detect(mood, "^Unhappy") ~ "firebrick",
+                              TRUE ~ "grey40"))
+
+  set.seed(123)
+  par(mar = c(0, 0, 2, 0))
+  wordcloud(words = cd$ngram, freq = cd$n_reviews, min.freq = 2, max.words = cloud_max[k],
+            scale = cloud_scale[[k]], rot.per = 0, random.order = FALSE,
+            ordered.colors = TRUE, colors = cd$colour)
+  title(paste0("Word cloud of repeated ", ngram_names[k],
+               " (green = happy guests, red = unhappy guests, grey = nutral)"), cex.main = 0.9)
+}
+```
+
+**Interpretation:**
+
+* n = 1: the biggest words (location, bed, clean, park, staff, bathroom, restaurant, shower, book) are mostly **grey**, because happy and unhappy guests both use them. Colour appears in the smaller words: **red** for door, smell, noisy, window, pay, dirty, disappoint, terrible, **green** for friendly, helpful, comfortable, central, restaurant, spacious, quiet. Single words show what guests talk about, but not whether the comment is good or bad.
+
+* n = 2 to 4: the colours become much clearer, because a phrase carries context. In the 4-gram cloud the **green** phrases are staff be friendly and helpful, be clean and tidy, within easy walk distance, free park on site and excellent value for money. The **red** phrases are from the car park, step into the shower, bathroom be ridiculously small, to pay for wifi, don't waste your money, a lot of money, pack up and leave, hole in the wall and the main entrance door.
+
+* n = 5 and n = 6: the clouds are smaller, because fewer phrases repeat, but the phrases are almost complete sentences. The same messages appear: friendly staff and clean rooms (green); getting from the car park, the shower step and the rabbit-warren layout (red).
+
+* Overall: word clouds are most useful for n = 2 to 4: the phrases are frequent enough to be reliable and long enough to show whether guests are happy or unhappy.
+
+# 6. Topic analysis (LDA)
+
+Reading hundreds of reviews to find the main themes is slow. Topic analysis finds them automatically. We use Latent Dirichlet Allocation (LDA), which assumes that:
+
+* each review is a mixture of topics (for example 70% "room problems" and 30% "location"), and
+
+* each topic is a group of words that tend to appear together.
+
+LDA does not now the meaning of a topic. It only returns a group of words, and we interpret them. LDA works on single words (n = 1), because longer n-grams are too rare to build topics from. We use the lemmatized words with stop words removed and drop words used in fewer than 5 reviews to remove noise. Afterwards, we use the repeated n-grams for n = 2 to 6 to show what each topic sounds like as phrases.
+
+```{r lda-prepare}
+# Meaningful words only
+content_words <- tokens_words |>
+  filter(!word %in% stop_words$word, !lemma %in% stop_words$word,
+         !word %in% custom_stop, !lemma %in% custom_stop, nchar(lemma) > 2)
+
+# Keep words used in at least 5 reviews
+common_terms <- content_words |>
+  distinct(review_id, lemma) |>
+  count(lemma) |>
+  filter(n >= 5) |>
+  pull(lemma)
+
+# Document-term matrix: one row per review, one column per word
+dtm <- content_words |>
+  filter(lemma %in% common_terms) |>
+  count(review_id, lemma) |>
+  cast_dtm(document = review_id, term = lemma, value = n)
+
+cat("Reviews:", nrow(dtm), "| Words:", ncol(dtm), "\n")
+```
+
+We try 2 to 6 topics. Perplexity measures how well the model predicts the words (lower is better), but it keeps falling slowly as topics are added, so we also look for topics that are easy to interpret. We choose 4.
+
+```{r lda-choose-k}
+perplexity_table <- map_dfr(2:6, function(k) {
+  m <- LDA(dtm, k = k, method = "Gibbs", control = list(seed = 123, burnin = 200, iter = 1000))
+  tibble(topics = k, perplexity = round(perplexity(m, dtm), 1))
+})
+
+perplexity_table
+```
+
+```{r lda-fit}
+lda_model <- LDA(dtm, k = 4, method = "Gibbs", control = list(seed = 123, burnin = 200, iter = 1000))
+
+# Top 10 words in each topic (beta = how strongly a word belongs to a topic)
+topic_words <- tidy(lda_model, matrix = "beta") |>
+  group_by(topic) |>
+  slice_max(beta, n = 10, with_ties = FALSE) |>
+  ungroup()
+
+topic_labels <- topic_words |>
+  group_by(topic) |>
+  summarise(label = paste0("Topic ", first(topic), ": ", paste(term[1:3], collapse = ", ")))
+
+topic_words |>
+  group_by(topic) |>
+  summarise(top_words = paste(term, collapse = ", "))
+```
+
+```{r lda-plot-words, fig.height=7}
+topic_words |>
+  left_join(topic_labels, by = "topic") |>
+  ggplot(aes(x = reorder_within(term, beta, label), y = beta, fill = label)) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered() +
+  coord_flip() +
+  facet_wrap(~ label, scales = "free_y") +
+  labs(title = "The four topics in Ramada reviews: top 10 words", x = NULL, y = "Word weight in the topic")
+```
+
+We assign each review to the topic with the highest share (gamma) and then look at the ratings.
+
+```{r lda-topic-ratings}
+dominant_topic <- tidy(lda_model, matrix = "gamma") |>
+  mutate(review_id = as.numeric(document)) |>
+  group_by(review_id) |>
+  slice_max(gamma, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  left_join(ramada_reviews |> select(review_id, rating_overall), by = "review_id")
+
+topic_summary <- dominant_topic |>
+  group_by(topic) |>
+  summarise(reviews = n(),
+            share_of_reviews_pct = round(n() / nrow(dominant_topic) * 100),
+            avg_rating = round(mean(rating_overall), 2),
+            pct_negative_reviews = round(mean(rating_overall <= 2) * 100)) |>
+  left_join(topic_labels, by = "topic")
+
+topic_summary |> select(label, reviews, share_of_reviews_pct, avg_rating, pct_negative_reviews)
+```
+
+```{r lda-plot-ratings}
+ggplot(topic_summary, aes(x = reorder(label, avg_rating), y = avg_rating, fill = avg_rating)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(avg_rating, " (", pct_negative_reviews, "% negative)")), hjust = -0.05, size = 3.5) +
+  coord_flip(ylim = c(0, 5.5)) +
+  scale_fill_gradient(low = "firebrick", high = "darkgreen") +
+  labs(title = "Average star rating of the reviews in each topic", x = NULL, y = "Average overall rating")
+```
+
+For each topic and each n from 2 to 6, we pick the most repeated n-gram that contains one of the topic's top-10 words. Reading across a row shows how the same theme grows from a short phrase into a full expression.
+
+```{r lda-phrases}
+topic_phrases <- map_dfr(1:4, function(t) {
+  terms   <- topic_words |> filter(topic == t) |> pull(term)
+  pattern <- paste0("\\b(", paste(terms, collapse = "|"), ")\\b")
+
+  map_dfr(2:6, function(k) {
+    gram_tables[[k]] |>
+      filter(n_reviews >= 2, str_detect(ngram, pattern)) |>
+      slice_head(n = 1) |>
+      mutate(n = k, topic = t)
+  })
+}) |>
+  left_join(topic_labels, by = "topic")
+
+topic_phrases |>
+  select(label, n, ngram) |>
+  pivot_wider(names_from = n, names_prefix = "n = ", values_from = ngram)
+```
+
+**Interpretation:**
+
+* Choice of topics: perplexity falls from about 265 (2 topics) to 254 (4 topics) and then flattens at about 250 (5 and 6 topics). Four topics are easy to interpret, so we use them.
+
+* Topic made of clean, staff, location, restaurant, comfortable, friendly, helpful is the happy-guest topic: about 30% of reviews, average rating 3.96, only 12% negative. Its phrases grow from central location to friendly and helpful, staff be friendly and helpful and the room be clean and tidy.
+
+* Topic made of bed, bathroom, shower, door, smell, window, sleep, people, step, noise is the problem topic: about 29% of reviews, average rating just 1.99, and 71% negative. Its phrases end with step to get into the shower: the high shower step is a clear complaint. (The phrase comfy bed is also picked for this topic simply because it contains the word "bed"; the topic mixes some praise with many complaints, but most of its reviews are negative.)
+
+* Topic made of park, car, reception, central, street, pay, free, front is about arrival, parking and reception: about 24% of reviews, average rating 3.07, 28% negative. Its phrases are car park, the front desk, on the main street and get from the car park to.
+
+* Topic made of book, check, expect, time, arrive, breakfast, service is about booking, check-in and expectations: about 17% of reviews, average rating 2.97, 36% negative. Its phrases (walk distance, within easy walk distance, check in and check out) show a mix of the good (location) and the practical (check-in), and no phrase repeats at n = 6.
+
+* Reading across a row shows how a theme becomes a full expression as n grows, which is the benefit of longer n-grams. LDA itself needs single words, since longer n-grams are too rare.
+
+* Meaning for the manager: nearly three in ten guests write mainly about room, bathroom and noise problems and rate the hotel about 2 out of 5. Fixing those issues is the most valuable improvement, followed by parking and the check-in experience.
+
+* *Note:* LDA is a statistical model: the topic numbers can change if the model is rerun with a different random seed, but the groups of words stay similar.
 
