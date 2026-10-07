@@ -51,6 +51,7 @@ pacman::p_load(tidytext, textstem, wordcloud, textdata, topicmodels)
 pacman::p_load(DescTools, skimr, finalfit, rstatix, huxtable, jtools)
 pacman::p_load(knitr, easystats, gtsummary, gt, scales)
 pacman::p_load(SnowballC, textstem)
+pacman::p_load(caret)
 ```
 
 # 2. Data Import and Initial Inspection
@@ -1827,7 +1828,7 @@ The correlation between a review's average n-gram score and its stars is 0.75 fo
 
 **extra charges**: the repeated phrases extra cost (6 reviews, average 2.3), pay for park and pay for wifi (both rated about 1.5 to 2.7).
 
-## Which aspects do guests talk about? (Aspect analysis)
+## 7.1 Which aspects do guests talk about? (Aspect analysis)
 
 **Why are we doing this?**
 To turn text into clear business topics, we search each review for keywords linked to an aspect (for example "noise", "loud" for *Noise & sleep*). For every aspect we compute how often guests mention it and what overall rating those reviews give, for Ramada and for competitors. If Ramada's reviews that mention an aspect are much lower than the competitors' reviews on the same aspect, that aspect is a **weakness**.
@@ -1875,16 +1876,19 @@ aspect_table |>
 **Interpretation:**
 
 * **What guests talk about:** *Room & bed* (86%), *Staff & service* (60%), *Location* (61%) and *Cleanliness* (52%) are the most discussed topics. Compared with competitors, Ramada guests talk **much more about parking (42% vs 21%)** and location (61% vs 49%), and **much less about facilities and breakfast (30% vs 49%)**, which suggests Ramada offers or promotes fewer facilities.
+
 * **How happy those guests are:** Ramada's reviews are lower than competitors' for every aspect. The biggest gaps are **Noise & sleep (-1.2; Ramada average 2.61, the lowest of all aspects)**, **Facilities (-1.1)**, **Cleanliness (-0.96)**, **Room & bed (-0.95)** and **Parking (-0.84)**.
+
 * The smallest gaps are for **Value & price (-0.68)** and **Location (-0.74)**, and the reviews that mention location and staff are Ramada's happiest ones (average ratings of about 3.4 and 3.2).
+
 * *Caution:* because Ramada's overall rating is lower, some gap is expected for every aspect. The value of this analysis is in the **ranking**: noise and sleep, facilities, cleanliness and rooms are where the unhappiness is concentrated. A keyword match also does not tell us if the comment was positive or negative.
 
-## Logistic regression: what makes a review negative?
+## 7.2 Logistic regression: what makes a review negative?
 
-**Why are we doing this?**
 Linear regression predicts a *number*. **Logistic regression** predicts a *yes/no outcome*; here, "is this review negative (1 or 2 stars)?". The model returns **odds ratios**:
 
-* an odds ratio **above 1** means the factor makes a negative review *more* likely,
+* an odds ratio 
+* **above 1** means the factor makes a negative review *more* likely,
 * **below 1** means *less* likely,
 * **1** means no effect.
 
@@ -1910,6 +1914,7 @@ cat("Share of Ramada reviews that are negative:", round(mean(ramada_logit_data$n
 # Train / test split (80 / 20)
 set.seed(123)
 logit_index <- createDataPartition(ramada_logit_data$negative, p = 0.8, list = FALSE)
+
 logit_train <- ramada_logit_data[logit_index, ]
 logit_test  <- ramada_logit_data[-logit_index, ]
 ```
@@ -1947,7 +1952,7 @@ ggplot(or_table, aes(x = odds_ratio, y = reorder(term, odds_ratio), colour = p_v
        x = "Odds ratio (log scale)", y = NULL, colour = NULL)
 ```
 
-**How good are the predictions?** We classify a review as negative when the predicted probability is above 0.5 and compare with reality on the test reviews.
+We classify a review as negative when the predicted probability is above 0.5 and compare with reality on the test reviews.
 
 ```{r logistic-test}
 prob  <- predict(logit_model, logit_test, type = "response")
@@ -1961,7 +1966,7 @@ round(cm$overall["Accuracy"], 3)
 round(cm$byClass[c("Sensitivity", "Specificity")], 3)
 ```
 
-**Is Ramada itself a risk factor?** We now combine Ramada and competitor reviews and add a Ramada indicator, to see how much more likely a Ramada review is negative *after* allowing for topics and review length.
+We now combine Ramada and competitor reviews and add a Ramada indicator, to see how much more likely a Ramada review is negative after allowing for topics and review length.
 
 ```{r logistic-combined}
 combined_data <- add_flags(bind_rows(ramada_reviews, comp_reviews)) |>
@@ -1978,19 +1983,25 @@ round(exp(cbind(odds_ratio = coef(logit_combined), confint.default(logit_combine
 
 **Model for Ramada reviews only (280 training reviews)**
 
-* About **37%** of Ramada reviews are negative (1-2 stars).
+* About 37% of Ramada reviews are negative (1-2 stars).
+
 * **Mentioning location** lowers the odds of a negative review by about **75%** (odds ratio 0.25, 95% CI 0.14 to 0.45, p < 0.001). Location is a source of satisfaction.
+
 * **Mentioning staff or service** words lowers the odds by about **59%** (odds ratio 0.41, p = 0.004). This agrees with the keyword analysis: friendly, helpful staff appear in happy reviews.
+
 * **Couples** have about 70% lower odds of a negative review than reviewers who did not state a trip type (odds ratio 0.30, p = 0.01). Business travellers are about the same as the reference group.
+
 * **Longer reviews are much more likely to be negative** (odds ratio 3.5 per one-unit increase in log words, p < 0.001; doubling the length multiplies the odds by about 2.4). Unhappy guests write more.
+
 * **Noise and sleep words** raise the odds of a negative review by about 69% (odds ratio 1.69), but this is **not significant at 5%** (p = 0.099) in this small sample, so it is only a hint. Room, cleanliness, parking, value and facilities words are not significant individually: a keyword can be mentioned positively or negatively ("clean room" or "dirty room"), and the sample is small.
+
 * **Predictive performance:** on the 69 test reviews, accuracy is about **74%** (it catches 64% of the truly negative reviews and correctly clears 80% of the others). This is acceptable but not strong, so we use the model to *understand* what drives negative reviews, not to predict them.
 
 **Combined model (Ramada plus competitors)**
 
 * The Ramada indicator has an odds ratio of about **6.3** (95% CI 4.8 to 8.2). Even for reviews of the same length that mention the same topics, a Ramada review has roughly **six times the odds** of being negative compared with a competitor review. The problem is not limited to a single topic: the overall guest experience is worse.
 
-## Summary: Ramada's strengths and weaknesses
+#8. Summary: Ramada's strengths and weaknesses
 
 ```{r sw-summary}
 strength_weakness <- wilcoxon_table |>
@@ -2002,27 +2013,469 @@ strength_weakness
 
 **Strengths (keep and promote)**
 
-| Strength | Evidence |
-|---|---|
-| **Location** | Rating 4.39, the same as competitors and ranked 28th of 71 in Hamilton. Mentioned in 61% of reviews; repeated phrases such as "central location", "walk distance" and "right in the middle of town"; mentioning location cuts the odds of a negative review by about 75%. |
-| **Responsiveness** | Replies to about 86% of reviews vs 54% for competitors (and 86% of negative reviews vs 32%). |
-| **Friendly, helpful staff (when it works)** | "Staff be friendly and helpful" is repeated in 9 reviews at n = 5 (average rating 4.1); mentioning staff cuts the odds of a negative review by about 59%. The service rating (3.59) is still below competitors. |
-| **Clean, comfortable rooms for happy guests** | Repeated phrases "clean and tidy", "room be clean and tidy" and "bed be comfortable"; the clean/staff/location topic has an average rating of 3.96 and only 12% negative reviews. |
+**Location** 
+Rating 4.39, the same as competitors and ranked 28th of 71 in Hamilton. Mentioned in 61% of reviews; repeated phrases such as "central location", "walk distance" and "right in the middle of town"; mentioning location cuts the odds of a negative review by about 75%.
+
+**Responsiveness**
+Replies to about 86% of reviews vs 54% for competitors (and 86% of negative reviews vs 32%).
+
+**Friendly, helpful staff (when it works)**
+"Staff be friendly and helpful" is repeated in 9 reviews at n = 5 (average rating 4.1); mentioning staff cuts the odds of a negative review by about 59%. The service rating (3.59) is still below competitors.
+
+**Clean, comfortable rooms for happy guests**
+Repeated phrases "clean and tidy", "room be clean and tidy" and "bed be comfortable"; the clean/staff/location topic has an average rating of 3.96 and only 12% negative reviews.
 
 **Weaknesses (fix first)**
 
-| Weakness | Evidence |
-|---|---|
-| **Rooms and bathrooms** | Room rating 3.19 vs 4.00 (p < 0.001). The topic *bed, bathroom, shower, door, smell, window, noise* covers 29% of reviews, with an average rating of 1.99 and 71% negative. Phrases: "step into the shower" (average rating 2.0), "bathroom be ridiculously small", "hole in the wall". |
-| **Smells and cleanliness** | Cleanliness 3.67 vs 4.26; at every n the strongest negative phrases are about musty, damp, stale and cigarette smells. |
-| **Noise and sleep** | Sleep rating 3.42 vs 4.10; the *Noise & sleep* aspect has the lowest rating (2.61) and the biggest gap (-1.2); phrases "on the main street" (2.6), "room be on the main street", "very loud repetitive noise". |
-| **Value for money and extra charges** | Value rating 3.25 vs 4.06 (p < 0.001) while the price is above most Hamilton competitors; phrases "extra cost" (6 reviews, average 2.3), "pay for park", "to pay for wifi" and "don't waste your money". |
-| **Parking and access** | Mentioned in 42% of reviews vs 21% for competitors; the phrase grows from "car park" to "get from the car park to" (average about 2.3 to 2.7); the parking, arrival and reception topic has 28% negative reviews. |
-| **Building layout** | "Rabbit warren" (9 reviews at n = 2, average 2.4) and "bit of a maze" appear in the repeated phrases. |
-| **Service consistency and problem handling** | Service 3.59 vs 4.17; "the front desk" (average 2.4), "customer service"; strongest negative phrases include "useless and rude"; the booking and check-in topic has 36% negative reviews. |
-| **More negative wording, and no improvement over time** | Ramada has about 1.5 times the competitors' share of negative n-grams at every n, and the share has been higher every year since 2014; ratings were 2.99 (up to 2019) vs 3.04 (2022 onward), p = 0.68. |
+**Rooms and bathrooms**
+Room rating 3.19 vs 4.00 (p < 0.001). The topic *bed, bathroom, shower, door, smell, window, noise* covers 29% of reviews, with an average rating of 1.99 and 71% negative. Phrases: "step into the shower" (average rating 2.0), "bathroom be ridiculously small", "hole in the wall".
 
----
+**Smells and cleanliness**
+Cleanliness 3.67 vs 4.26; at every n the strongest negative phrases are about musty, damp, stale and cigarette smells.
+
+**Noise and sleep**
+Sleep rating 3.42 vs 4.10; the *Noise & sleep* aspect has the lowest rating (2.61) and the biggest gap (-1.2); phrases "on the main street" (2.6), "room be on the main street", "very loud repetitive noise".
+
+**Value for money and extra charges**
+Value rating 3.25 vs 4.06 (p < 0.001) while the price is above most Hamilton competitors; phrases "extra cost" (6 reviews, average 2.3), "pay for park", "to pay for wifi" and "don't waste your money".
+
+**Parking and access**
+Mentioned in 42% of reviews vs 21% for competitors; the phrase grows from "car park" to "get from the car park to" (average about 2.3 to 2.7); the parking, arrival and reception topic has 28% negative reviews.
+
+**Building layout**
+"Rabbit warren" (9 reviews at n = 2, average 2.4) and "bit of a maze" appear in the repeated phrases.
 
 
+**Service consistency and problem handling**
+Service 3.59 vs 4.17; "the front desk" (average 2.4), "customer service"; strongest negative phrases include "useless and rude"; the booking and check-in topic has 36% negative reviews.
+
+**More negative wording, and no improvement over time**
+Ramada has about 1.5 times the competitors' share of negative n-grams at every n, and the share has been higher every year since 2014; ratings were 2.99 (up to 2019) vs 3.04 (2022 onward), p = 0.68.
+
+# 9. Machine Learning Models and Price Prediction
+
+##9.1 Planning the model
+
+The manager wants an estimate of what the hotel should cost given its features. We train several models on hotels with a known price and see which predicts best on hotels it has not seen. Key decisions:
+
+* **Target:** `price`. Because price is right-skewed, we model `log(price)` and convert predictions back to dollars with `exp()`.
+
+* **Outliers:** a few ultra-luxury lodges (over $1,000 per night, for example a $4,014 lodge) behave very differently from a city hotel like Ramada, so we exclude hotels above $1,000 from training.
+
+* **Variables excluded to avoid leakage:** `offer_pricemin`, `offer_pricemax` (they are almost the same as price) and `price_class` / `price_cat` (price missing and price class missing occur for exactly the same hotels, so it is derived from price).
+
+* **Missing predictors:** replaced by the median plus a `no_rating` flag.
+
+* **Fair testing:** 80% of hotels train the model and 20% are kept aside as a test set.
+
+```{r ml-prepare}
+# Hotels with a known price, without extreme luxury lodges
+model_raw <- hotel_main |> filter(!is.na(price), price <= 1000)
+
+cat("Hotels with a price:", sum(!is.na(hotel_main$price)), "\n")
+cat("Removed as extreme (> $1000):", sum(hotel_main$price > 1000, na.rm = TRUE), "\n")
+cat("Hotels used for modelling:", nrow(model_raw), "\n")
+
+# Predictors used in the models
+model_vars <- c("category", "area", "star_num", "room", "photo", "review",  rating_vars, "rank_pct", "amenity_count", "amenity_parking", "amenity_wifi", "amenity_pool", "amenity_kitchen", "amenity_breakfastinc", "latitude", "longitude", "no_rating")
+
+# Medians come from the modelling data and are also used for Ramada
+num_to_impute <- c("star_num", "room", "photo", "review", rating_vars, "rank_pct")
+medians <- model_raw |> summarise(across(all_of(num_to_impute), ~ median(.x, na.rm = TRUE)))
+
+prepare_model_data <- function(df) {
+  df <- df |>
+    mutate(no_rating = as.numeric(is.na(rating_overall)),
+           category  = factor(category, levels = c("Hotel", "Bed and Breakfast", "Specialty Lodging")),
+           area      = factor(area, levels = c(top_localities, "Other")))
+  for (v in num_to_impute) {
+    df[[v]] <- if_else(is.na(df[[v]]), medians[[v]], df[[v]])
+  }
+  df
+}
+
+model_data <- prepare_model_data(model_raw) |>
+  mutate(log_price = log(price)) |>
+  select(price, log_price, all_of(model_vars))
+
+sum(is.na(model_data))   # should be 0
+
+# Ramada's row goes through exactly the same preparation (used later for predictions)
+ramada_model <- prepare_model_data(hotel_pred) |>
+  select(all_of(model_vars))
+```
+
+## 9.2 Train / test split
+
+```{r ml-split}
+set.seed(123)
+train_index <- createDataPartition(model_data$log_price, p = 0.8, list = FALSE)
+
+train_data <- model_data[train_index, ]
+test_data  <- model_data[-train_index, ]
+
+cat("Training hotels:", nrow(train_data), " Test hotels:", nrow(test_data), "\n")
+
+# Training table without the dollar price (the models learn from log_price)
+train_x <- train_data |> select(-price)
+```
+
+## 9.3 Linear regression in detail
+
+Linear regression is the most explainable model: it tells us how much each factor changes the price. Because the target is `log(price)`, a coefficient `b` means that a one-unit increase in the variable changes the price by about `exp(b) - 1` percent (for example `b = 0.28` gives about +32%).
+
+Before fitting, we check multicollinearity: when predictors overlap strongly, coefficients become unstable. The VIF (variance inflation factor) measures this: values above about 5 suggest overlap and above 10 is serious.
+
+```{r lm-vif}
+# VIF = 1 / (1 - R-squared of predicting one variable from the others)
+vif_check <- function(data, vars) {
+  sapply(vars, function(v) {
+    r2 <- summary(lm(reformulate(setdiff(vars, v), v), data = data))$r.squared
+    1 / (1 - r2)
+  })
+}
+
+all_numeric <- setdiff(names(train_x)[sapply(train_x, is.numeric)], "log_price")
+round(sort(vif_check(train_x, all_numeric), decreasing = TRUE), 1)
+```
+
+The rating scores overlap the most (VIF about 5 to 7). For an explainable model we therefore keep only a few representative variables: overall, room and value ratings, star class, size, photos, a few amenities, location and type.
+
+```{r lm-fit}
+lm_formula <- log_price ~ category + area + star_num + room + photo + rating_overall + rating_room + rating_value + amenity_count + amenity_parking + amenity_breakfastinc + latitude
+
+# VIF for the numeric variables we kept
+round(vif_check(train_x, c("star_num", "room", "photo", "rating_overall", "rating_room", "rating_value", "amenity_count")), 1)
+
+lm_simple <- lm(lm_formula, data = train_x)
+summary(lm_simple)
+```
+
+```{r lm-effects}
+# Significant effects, translated into % changes in price
+broom::tidy(lm_simple) |>
+  filter(term != "(Intercept)", p.value < 0.05) |>
+  transmute(variable = term, coefficient = round(estimate, 3),
+            pct_change_in_price = round((exp(estimate) - 1) * 100, 1),
+            p_value = signif(p.value, 3)) |>
+  arrange(desc(abs(pct_change_in_price)))
+```
+
+**Checking the assumptions.** The four standard diagnostic plots show whether a linear model is reasonable: residuals should scatter randomly around zero (top left), follow the straight line in the Q-Q plot (top right), have a constant spread (bottom left) and no single point should dominate (bottom right).
+
+```{r lm-diagnostics, fig.height=7, fig.width=8}
+par(mfrow = c(2, 2))
+plot(lm_simple)
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+* **Overall fit:** R-squared is **0.415** (adjusted 0.379), so the model explains about 41% of the variation in log price, and the F-test (p < 0.001) says the model as a whole is significant. The residual standard error of 0.38 on the log scale means a typical prediction can be off by roughly 30% to 45%. This is useful but not precise.
+
+* **Multicollinearity:** the full set of numeric predictors had VIF values up to about 7. For the variables we kept the maximum is **4.3** (below 5), so the coefficients can be interpreted.
+
+* **Significant effects (holding the others constant):**
+
+* each extra **star** is linked to about **+32%** in price (p < 0.001),
+
+* each extra point of **room rating** to about **+27%** (p < 0.001),
+
+* **breakfast included** to about **+23%**,
+
+* each additional **amenity** to about **+3.5%**,
+
+* a **free-parking flag** to about **-27%**. This is an association rather than a cause: parking is typical of motels and lodges, which are cheaper,
+
+* compared with the reference area (Taupo), **Raglan is about 48% higher**, **Thames about 29% lower** and **Hamilton about 19% lower**.
+
+* **Not significant:** type of accommodation, number of rooms, photos, latitude, and the **overall and value ratings**. The overall and value ratings overlap with the room rating (VIF 4.3 and 3.1), so the room rating takes up their effect. The market does not seem to pay separately for a good value score.
+
+* **Assumption checks:** the residuals scatter around zero with only a slight curve, the Q-Q plot follows the line except for a few very cheap hotels at the bottom (points 317, 208 and 212) that the model overprices, the spread is roughly constant, and no point comes near the Cook's distance limit. The assumptions are reasonably met.
+
+* **What this means for Ramada:** its room rating (3.2) is about 0.6 points below the Hamilton average (3.82). With a coefficient of 0.24, closing that gap would be linked to a price roughly **16% higher** (`exp(0.24 x 0.62) - 1`), all else equal.
+
+## 9.4 Training the models
+
+We try models from simple to flexible, because no single model is always best:
+
+**Baseline** Always predict the average price. Any useful model must beat this.
+
+**Linear regression** Price changes in a straight line with each variable. Easy to explain.
+
+**Lasso / ridge (glmnet)** Linear regression that shrinks unhelpful variables, which reduces over-fitting.
+
+**Decision tree** Asks a series of yes/no questions to group similar hotels.
+
+**K-nearest neighbour (KNN)** Predicts a hotel's price as the average price of the *k* most similar hotels.
+
+**Random forest** Averages hundreds of trees. Usually accurate, harder to explain.
+
+We use **5-fold cross-validation repeated 3 times** (the training data is split into 5 parts; the model is trained on 4 parts and checked on the 5th, and this is repeated for every part and three different random splits). This tunes each model fairly and gives a more stable error estimate than a single split.
+
+```{r ml-train}
+ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+
+set.seed(123)
+fit_lm <- train(lm_formula, data = train_x, method = "lm", trControl = ctrl)   # the model explained above
+
+set.seed(123)
+fit_glmnet <- train(log_price ~ ., data = train_x, method = "glmnet", trControl = ctrl,
+                    preProcess = c("center", "scale"), tuneLength = 10)
+
+set.seed(123)
+fit_tree <- train(log_price ~ ., data = train_x, method = "rpart", trControl = ctrl,
+                  tuneLength = 10)
+
+# KNN needs variables on the same scale, so we centre and scale them; we try k = 3, 5, ..., 25
+set.seed(123)
+fit_knn <- train(log_price ~ ., data = train_x, method = "knn", trControl = ctrl,
+                 preProcess = c("center", "scale"), tuneGrid = data.frame(k = seq(3, 25, 2)))
+
+set.seed(123)
+fit_rf <- train(log_price ~ ., data = train_x, method = "rf", trControl = ctrl,
+                tuneLength = 5, ntree = 300, importance = TRUE)
+
+# Settings chosen by cross-validation
+fit_glmnet$bestTune
+fit_tree$bestTune
+fit_knn$bestTune
+fit_rf$bestTune
+```
+
+## 9.5 Comparing the models on the test set
+
+The test hotels were never used for training, so errors on them show how the model would perform on a new hotel such as Ramada. We also show the cross-validated error from the training data (on the log scale, so it is a proportional error). The measures are:
+
+* **RMSE** (root mean squared error): typical error size; punishes big mistakes.
+
+* **MAE** (mean absolute error): average error in dollars.
+
+* **R-squared:** share of the variation in price the model explains (0 = nothing, 1 = everything).
+
+```{r ml-compare}
+models <- list("Linear regression" = fit_lm,
+               "Lasso/Ridge (glmnet)" = fit_glmnet,
+               "Decision tree" = fit_tree,
+               "K-nearest neighbour" = fit_knn,
+               "Random forest" = fit_rf)
+
+# Baseline: always predict the average (on the log scale)
+baseline_pred <- rep(exp(mean(train_x$log_price)), nrow(test_data))
+
+results <- bind_rows(
+  tibble(Model = "Baseline (average price)", CV_RMSE_log = NA, CV_R2 = NA,
+         Test_RMSE = RMSE(baseline_pred, test_data$price),
+         Test_MAE  = MAE(baseline_pred, test_data$price),
+         Test_R2   = 0),
+  map_dfr(names(models), function(nm) {
+    pred <- exp(predict(models[[nm]], test_data))          # back to dollars
+    m  <- postResample(pred, test_data$price)
+    cv <- getTrainPerf(models[[nm]])
+    tibble(Model = nm,
+           CV_RMSE_log = cv$TrainRMSE, CV_R2 = cv$TrainRsquared,
+           Test_RMSE = m["RMSE"], Test_MAE = m["MAE"], Test_R2 = m["Rsquared"])
+  })
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+results
+
+# Best model = lowest cross-validated error (more stable than one small test set)
+best_model_name <- results |> filter(!is.na(CV_RMSE_log)) |> arrange(CV_RMSE_log) |> slice(1) |> pull(Model)
+best_fit <- models[[best_model_name]]
+cat("Best model by cross-validation:", best_model_name, "\n")
+```
+
+```{r ml-plot-compare}
+results |>
+  ggplot(aes(x = reorder(Model, -Test_RMSE), y = Test_RMSE, fill = Model == best_model_name)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(Test_RMSE, 1)), hjust = -0.1) +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "grey60")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Test-set error (RMSE in dollars): lower is better",
+       subtitle = "Red = model chosen by cross-validation", x = NULL, y = "RMSE ($)")
+```
+
+**Interpretation:**
+
+* **Best model:** the **`r best_model_name`** has the lowest cross-validated error (about `r round(results$CV_RMSE_log[results$Model == best_model_name], 2)` on the log scale, which means a typical prediction is off by roughly `r round((exp(results$CV_RMSE_log[results$Model == best_model_name]) - 1) * 100)`%). Its cross-validated R-squared is `r round(results$CV_R2[results$Model == best_model_name], 2)`, so it explains about `r round(results$CV_R2[results$Model == best_model_name] * 100)`% of the variation in log price.
+
+* **Test set:** the baseline error is about $`r round(results$Test_RMSE[results$Model == "Baseline (average price)"], 1)`, while the models range from about $`r round(min(results$Test_RMSE[results$Model != "Baseline (average price)"]), 1)` to $`r round(max(results$Test_RMSE[results$Model != "Baseline (average price)"]), 1)`. The improvement over the baseline is **small**, and the single decision tree is worse than simply guessing the average. The test set has only `r nrow(test_data)` hotels, so these dollar figures are noisy (for example KNN looks best on the test set but only fourth on cross-validation). That is why we choose the model with the cross-validated error, which uses many more predictions.
+* **Simple versus complex:** the linear regression and lasso/ridge have cross-validated errors close to the random forest (about 0.40 against 0.38), so the more complicated model gains only a little. The decision tree and KNN are weaker in cross-validation.
+
+* **Honest conclusion:** the variables available explain only part of what hotels charge. Room quality, season, special events, brand and the exact room type are not in the data. The prediction should be used as a **guide, not an exact price**.
+
+## 9.6 Checking the best model
+
+We plot predicted against actual prices (points near the diagonal line are good predictions) and look at the errors.
+
+```{r ml-diagnostics}
+test_eval <- test_data |>
+  mutate(predicted = exp(predict(best_fit, test_data)),
+         error = predicted - price)
+
+ggplot(test_eval, aes(x = price, y = predicted)) +
+  geom_point(alpha = 0.7, colour = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, colour = "red", linetype = "dashed") +
+  labs(title = paste("Actual vs predicted price -", best_model_name),
+       x = "Actual price", y = "Predicted price")
+
+ggplot(test_eval, aes(x = error)) +
+  geom_histogram(bins = 25, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = 0, colour = "red", linetype = "dashed") +
+  labs(title = "Prediction errors on the test set", x = "Predicted minus actual ($)", y = "Hotels")
+```
+
+## Looking inside the decision tree
+
+**Why are we doing this?**
+A decision tree is easy to read: each box asks a yes/no question about a hotel, and the final boxes (leaves) give the average log price of the hotels that end up there. We convert each leaf to dollars so that we can see what kind of hotel each leaf represents.
+
+```{r tree-plot, fig.height=6}
+tree_model <- fit_tree$finalModel
+
+plot(tree_model, uniform = TRUE, margin = 0.1)
+text(tree_model, use.n = TRUE, cex = 0.8)   # each leaf shows average log(price) and the number of hotels
+```
+
+```{r tree-leaves}
+# Leaves in dollars
+tree_model$frame |>
+  filter(var == "<leaf>") |>
+  transmute(hotels_in_leaf = n, typical_price = round(exp(yval)))
+
+# Which leaf does Ramada fall into?
+cat("Decision tree estimate for Ramada: $", round(exp(predict(fit_tree, ramada_model)), 2), "\n")
+```
+
+**Interpretation:**
+
+* The tree uses only **two variables: the room rating (first split at 4.65) and the star class**. This again shows that room quality and stars are what the market prices.
+* There are five leaves with typical prices of about **$91** (very low-star hotels, 10 hotels), **$165** (205 hotels: room rating below 4.65 and 2.25 to 4.25 stars), **$283** (high-star hotels with room rating below 4.65, 10 hotels), **$231** (room rating 4.65 or more but under 4.25 stars, 101 hotels) and **$452** (room rating 4.65 or more and 4.25 or more stars, 16 hotels).
+* **Ramada** (room rating 3.2, 3.5 stars) falls in the big middle leaf, with an estimate of about **$165**. To reach the $231 leaf, the room rating would need to rise above 4.65, which is a high bar and shows how much a really good room rating is worth.
+* The tree is easy to read but coarse: it can only give five different prices, and it had the highest test error. It is best used for explanation, not for the final prediction.
+
+## Which variables drive the price?
+
+**Why are we doing this?**
+Variable importance from the random forest tells us which features the model relies on most. This helps the manager see what the market rewards.
+
+```{r ml-importance}
+imp <- varImp(fit_rf)$importance |>
+  rownames_to_column("variable") |>
+  arrange(desc(Overall)) |>
+  slice_head(n = 12)
+
+ggplot(imp, aes(x = reorder(variable, Overall), y = Overall)) +
+  geom_col(fill = "darkorange") +
+  coord_flip() +
+  labs(title = "Random forest: top 12 most important variables", x = NULL, y = "Importance (scaled 0-100)")
+```
+
+**Interpretation:**
+
+* In our run, the most important variables are the **star class** and the **room rating**, followed by **location (longitude)**, **breakfast included**, **Specialty Lodging type**, **number of reviews**, **parking** and the **sleep rating**.
+* This agrees with the EDA: the market pays for *official hotel quality (stars)* and *the quality of the room*. Ramada's room rating (3.2) is below the Hamilton average (3.82) and its sleep rating (3.4) is also low, so improving these is the route to a higher price.
+* Importance shows what the model uses, not what *causes* price changes.
+
+## Predicting Ramada's price
+
+**Why are we doing this?**
+Now we apply the models to Ramada's row in `hotel_pred`. It goes through the *same* preparation steps as the training data. We show every model's prediction, the best model's estimate, and a rough 80% range based on the typical error on the test set.
+
+```{r ml-predict}
+# Prediction from every model
+ramada_predictions <- map_dfr(names(models), function(nm) {
+  tibble(Model = nm, Predicted_price = round(exp(predict(models[[nm]], ramada_model)), 2))
+})
+ramada_predictions
+
+# Best model + approximate 80% range from the test-set error on the log scale
+rmse_log <- RMSE(predict(best_fit, test_data), test_data$log_price)
+ramada_pred_price <- exp(predict(best_fit, ramada_model))
+lower <- ramada_pred_price * exp(-1.28 * rmse_log)
+upper <- ramada_pred_price * exp( 1.28 * rmse_log)
+
+current_price <- 183.50
+
+tibble(
+  `Current price`        = current_price,
+  `Predicted price`      = round(ramada_pred_price, 2),
+  `Approx. 80% range`    = paste0("$", round(lower), " to $", round(upper)),
+  `Difference ($)`       = round(current_price - ramada_pred_price, 2),
+  `Difference (%)`       = round((current_price - ramada_pred_price) / ramada_pred_price * 100, 1)
+)
+```
+
+## What if Ramada's guest ratings improved?
+
+**Why are we doing this?**
+The model uses ratings as predictors. We can ask: *what would the model predict if Ramada's scores matched the Hamilton competitor average?* This shows the price value of improving guest experience.
+
+```{r ml-whatif}
+ramada_whatif <- ramada_row |>
+  mutate(across(all_of(rating_vars), ~ round(mean(ham_comp[[cur_column()]], na.rm = TRUE), 2)))
+
+ramada_whatif_model <- prepare_model_data(ramada_whatif) |> select(all_of(model_vars))
+
+whatif_price <- exp(predict(best_fit, ramada_whatif_model))
+
+tibble(
+  Scenario = c("Ramada as it is today", "Ramada rated like the Hamilton average"),
+  Predicted_price = round(c(ramada_pred_price, whatif_price), 2)
+)
+```
+
+**Interpretation:**
+
+* **Prediction:** the best model estimates a price of about **$`r round(ramada_pred_price)`** per night, with an approximate 80% range of **$`r round(lower)` to $`r round(upper)`**. The range is wide because hotel prices are hard to predict.
+* **Across all models:** the predictions range from about $`r round(min(ramada_predictions$Predicted_price))` to $`r round(max(ramada_predictions$Predicted_price))`.
+* **Compared with today's price:** the current $183.50 is about **`r abs(round((183.5 - ramada_pred_price) / ramada_pred_price * 100))`% `r ifelse(183.5 > ramada_pred_price, "above", "below")`** the model's estimate.
+* **What-if:** if Ramada's ratings matched the Hamilton average, the model would estimate about **$`r round(whatif_price)`**, an increase of about `r round((whatif_price / ramada_pred_price - 1) * 100)`%. Improving guest experience would support a higher price, but the model is cautious about how much.
+* **Meaning:** the model gives **no evidence that the hotel can raise its price now**. The current price is still inside the model's uncertainty range, but it is above the model's central estimate, so there is no data-based case for an increase at present.
+
+## K-nearest neighbour: Ramada's most similar hotels
+
+**Why are we doing this?**
+KNN is the easiest model to explain to a manager: *"hotels like yours charge about this much"*. We measure how similar every hotel is to Ramada (using the standardised numeric variables) and list the 5 nearest hotels. First, the plot shows how the error changed as we tried different numbers of neighbours *k* (the best *k* is the lowest point).
+
+```{r knn-tuning}
+plot(fit_knn, main = "KNN: cross-validated error for different numbers of neighbours (k)")
+```
+
+```{r knn-neighbours}
+nn_vars <- c("star_num", "room", "photo", "review", rating_vars,
+             "rank_pct", "amenity_count", "latitude", "longitude")
+
+# Standardise each variable (mean 0, sd 1) so that none dominates the distance
+centre <- colMeans(model_data[nn_vars])
+spread <- sapply(model_data[nn_vars], sd)
+z_hotels <- scale(model_data[nn_vars], center = centre, scale = spread)
+z_ramada <- scale(ramada_model[nn_vars], center = centre, scale = spread)
+
+# Straight-line (Euclidean) distance from Ramada to each hotel
+distance <- sqrt(rowSums((z_hotels - matrix(z_ramada, nrow = nrow(z_hotels),
+                                            ncol = ncol(z_hotels), byrow = TRUE))^2))
+
+nearest <- order(distance)[1:5]
+
+neighbours <- model_raw |>
+  slice(nearest) |>
+  mutate(distance = round(distance[nearest], 2)) |>
+  select(name, locality, category, hotel_class, room, rating_overall, price, distance)
+
+neighbours
+cat("Average price of the 5 most similar hotels: $", round(mean(neighbours$price)), "\n")
+cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)), 2), "\n")
+```
+
+**Interpretation:**
+
+* **Choosing k:** the error is lowest at about **k = 15** neighbours. With very few neighbours the prediction is noisy, and with many neighbours it becomes too general.
+* **Ramada's five most similar hotels** are Te Aroha Holiday Park ($76.50), Anglesea Motel and Conference Centre (about $116), Aspen Manor Motel (about $138), Tudor Motor Lodge (about $130) and Okoroire Hot Springs Hotel ($245). They charge on average about **$141**. Most are Hamilton motels, which agrees with the cluster analysis. Ramada's $183.50 is about 30% above this average.
+* The **KNN model estimate** for Ramada is about **$`r round(exp(predict(fit_knn, ramada_model)))`**, which is lower than the other models.
+* KNN had the lowest error on the small test set but a worse cross-validated error than the random forest, so we do not rely on it alone. Its message agrees with the others: similar hotels charge less than Ramada does today.
 
