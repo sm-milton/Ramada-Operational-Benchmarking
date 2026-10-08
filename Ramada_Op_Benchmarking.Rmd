@@ -51,7 +51,7 @@ pacman::p_load(tidytext, textstem, wordcloud, textdata, topicmodels)
 pacman::p_load(DescTools, skimr, finalfit, rstatix, huxtable, jtools)
 pacman::p_load(knitr, easystats, gtsummary, gt, scales)
 pacman::p_load(SnowballC, textstem)
-pacman::p_load(caret)
+pacman::p_load(caret, tibble)
 ```
 
 # 2. Data Import and Initial Inspection
@@ -2329,9 +2329,8 @@ ggplot(test_eval, aes(x = error)) +
   labs(title = "Prediction errors on the test set", x = "Predicted minus actual ($)", y = "Hotels")
 ```
 
-## Looking inside the decision tree
+## 9.10 Looking inside the decision tree
 
-**Why are we doing this?**
 A decision tree is easy to read: each box asks a yes/no question about a hotel, and the final boxes (leaves) give the average log price of the hotels that end up there. We convert each leaf to dollars so that we can see what kind of hotel each leaf represents.
 
 ```{r tree-plot, fig.height=6}
@@ -2354,13 +2353,15 @@ cat("Decision tree estimate for Ramada: $", round(exp(predict(fit_tree, ramada_m
 **Interpretation:**
 
 * The tree uses only **two variables: the room rating (first split at 4.65) and the star class**. This again shows that room quality and stars are what the market prices.
+
 * There are five leaves with typical prices of about **$91** (very low-star hotels, 10 hotels), **$165** (205 hotels: room rating below 4.65 and 2.25 to 4.25 stars), **$283** (high-star hotels with room rating below 4.65, 10 hotels), **$231** (room rating 4.65 or more but under 4.25 stars, 101 hotels) and **$452** (room rating 4.65 or more and 4.25 or more stars, 16 hotels).
+
 * **Ramada** (room rating 3.2, 3.5 stars) falls in the big middle leaf, with an estimate of about **$165**. To reach the $231 leaf, the room rating would need to rise above 4.65, which is a high bar and shows how much a really good room rating is worth.
+
 * The tree is easy to read but coarse: it can only give five different prices, and it had the highest test error. It is best used for explanation, not for the final prediction.
 
-## Which variables drive the price?
+## 9.11 Variables drive the price?
 
-**Why are we doing this?**
 Variable importance from the random forest tells us which features the model relies on most. This helps the manager see what the market rewards.
 
 ```{r ml-importance}
@@ -2378,12 +2379,13 @@ ggplot(imp, aes(x = reorder(variable, Overall), y = Overall)) +
 **Interpretation:**
 
 * In our run, the most important variables are the **star class** and the **room rating**, followed by **location (longitude)**, **breakfast included**, **Specialty Lodging type**, **number of reviews**, **parking** and the **sleep rating**.
+
 * This agrees with the EDA: the market pays for *official hotel quality (stars)* and *the quality of the room*. Ramada's room rating (3.2) is below the Hamilton average (3.82) and its sleep rating (3.4) is also low, so improving these is the route to a higher price.
+
 * Importance shows what the model uses, not what *causes* price changes.
 
-## Predicting Ramada's price
+# 10. Predicting Ramada's price
 
-**Why are we doing this?**
 Now we apply the models to Ramada's row in `hotel_pred`. It goes through the *same* preparation steps as the training data. We show every model's prediction, the best model's estimate, and a rough 80% range based on the typical error on the test set.
 
 ```{r ml-predict}
@@ -2410,9 +2412,8 @@ tibble(
 )
 ```
 
-## What if Ramada's guest ratings improved?
+## 10.1 What if Ramada's guest ratings improved?
 
-**Why are we doing this?**
 The model uses ratings as predictors. We can ask: *what would the model predict if Ramada's scores matched the Hamilton competitor average?* This shows the price value of improving guest experience.
 
 ```{r ml-whatif}
@@ -2432,14 +2433,17 @@ tibble(
 **Interpretation:**
 
 * **Prediction:** the best model estimates a price of about **$`r round(ramada_pred_price)`** per night, with an approximate 80% range of **$`r round(lower)` to $`r round(upper)`**. The range is wide because hotel prices are hard to predict.
+
 * **Across all models:** the predictions range from about $`r round(min(ramada_predictions$Predicted_price))` to $`r round(max(ramada_predictions$Predicted_price))`.
+
 * **Compared with today's price:** the current $183.50 is about **`r abs(round((183.5 - ramada_pred_price) / ramada_pred_price * 100))`% `r ifelse(183.5 > ramada_pred_price, "above", "below")`** the model's estimate.
+
 * **What-if:** if Ramada's ratings matched the Hamilton average, the model would estimate about **$`r round(whatif_price)`**, an increase of about `r round((whatif_price / ramada_pred_price - 1) * 100)`%. Improving guest experience would support a higher price, but the model is cautious about how much.
+
 * **Meaning:** the model gives **no evidence that the hotel can raise its price now**. The current price is still inside the model's uncertainty range, but it is above the model's central estimate, so there is no data-based case for an increase at present.
 
-## K-nearest neighbour: Ramada's most similar hotels
+## 10.2 K-nearest neighbour: Ramada's most similar hotels
 
-**Why are we doing this?**
 KNN is the easiest model to explain to a manager: *"hotels like yours charge about this much"*. We measure how similar every hotel is to Ramada (using the standardised numeric variables) and list the 5 nearest hotels. First, the plot shows how the error changed as we tried different numbers of neighbours *k* (the best *k* is the lowest point).
 
 ```{r knn-tuning}
@@ -2475,7 +2479,56 @@ cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)
 **Interpretation:**
 
 * **Choosing k:** the error is lowest at about **k = 15** neighbours. With very few neighbours the prediction is noisy, and with many neighbours it becomes too general.
+
 * **Ramada's five most similar hotels** are Te Aroha Holiday Park ($76.50), Anglesea Motel and Conference Centre (about $116), Aspen Manor Motel (about $138), Tudor Motor Lodge (about $130) and Okoroire Hot Springs Hotel ($245). They charge on average about **$141**. Most are Hamilton motels, which agrees with the cluster analysis. Ramada's $183.50 is about 30% above this average.
+
 * The **KNN model estimate** for Ramada is about **$`r round(exp(predict(fit_knn, ramada_model)))`**, which is lower than the other models.
+
 * KNN had the lowest error on the small test set but a worse cross-validated error than the random forest, so we do not rely on it alone. Its message agrees with the others: similar hotels charge less than Ramada does today.
+
+# 11. Findings, Recommendations and Conclusion
+
+## 11.1 Major findings
+
+1. **Ramada is clearly behind its Hamilton competitors.** Its average review rating is **3.01 vs 3.93** (hotel-level scores 3.0 vs 3.76, ranked 62nd of 80). About **37% of Ramada reviews are 1-2 stars compared with 13%** for competitors.
+
+2. **The gaps are statistically significant on six of seven aspects** (all p < 0.001): overall (-0.92), room (-0.81), value (-0.81), sleep (-0.68), cleanliness (-0.59) and service (-0.58). **Only location is equal** (4.39).
+
+3. **Strengths:** location, a very high review response rate (86% vs 54%), and friendly, helpful staff and cleanliness in satisfied guests' reviews.
+
+4. **Weaknesses seen in the review text:** room and bathroom condition (bathroom, shower, door, bed, window), noise and poor sleep, smells and cleanliness, parking (mentioned twice as often as at competitors), and uneven handling of problems at reception.
+
+5. **No improvement over time:** the average rating was 2.99 up to 2019 and 3.04 from 2022 onward (p = 0.68). Business travellers, a large group of reviewers, are among the least satisfied (about 2.7).
+
+6. **Quality drives price, and Ramada's quality score is low.** PCA shows that the six ratings are really one "overall quality" score (83% of the information); **75% of Hamilton competitors score better than Ramada**, while its location score is unusually strong. In the linear regression, each extra star adds about 32% to price and each point of room rating about 27%. Ramada's room rating (3.2) is 0.6 below the Hamilton average.
+
+7. **Ramada's true peers are lower-rated motels and lodges.** Cluster analysis places Ramada in a group of 17 Hamilton properties with an average price of $136 and rating of 3.12, not with the high-rated group (price $206, rating 4.39). Ramada's price is about **35% above its peers** although its ratings are the same as theirs, and its five most similar hotels average only about $141.
+
+8. **Negative reviews:** even after allowing for topics and review length, a Ramada review has about **six times the odds of being 1-2 stars** compared with a competitor's review. Within Ramada's reviews, mentioning location or staff is linked to happy guests, while noise is the topic most linked to unhappy guests (a hint only, p = 0.099).
+
+9. **Pricing:** Ramada's $183.50 is **higher than about 63% of Hamilton hotels** and about `r abs(round((183.5 - ramada_pred_price) / ramada_pred_price * 100))`% `r ifelse(183.5 > ramada_pred_price, "above", "below")` the best model's estimate of about $`r round(ramada_pred_price)`. The five models estimate between $`r round(min(ramada_predictions$Predicted_price))` and $`r round(max(ramada_predictions$Predicted_price))`. If its ratings matched the Hamilton average, the estimate would rise to about $`r round(whatif_price)`.
+
+## 11.2 Recommendations
+
+**1. Do not increase the price now.** Guests already rate value for money low (3.25 vs 4.06), the price is above most Hamilton competitors and about 35% above its true peer group, and all five models estimate a lower price than today's. Consider revisiting the price once the room, noise and cleanliness ratings improve, and test any increase carefully (for example on a few room types) while monitoring the value rating.
+
+**2. Fix the physical product first (highest priority).** Inspect and refurbish the worst rooms and bathrooms: shower and bathroom doors that do not close properly, tiny or tired bathrooms, mattresses and beds, worn carpet, smells and windows.
+
+**3. Improve noise and sleep quality.** This is the largest aspect gap. Options are better window sealing or double glazing, servicing noisy air-conditioning units, door closers, offering quieter rooms away from the street, and providing earplugs.
+
+**4. Raise cleanliness and air quality standards.** Add housekeeping audits and deep-cleaning schedules, address smells and ventilation, and enforce the non-smoking policy.
+
+**5. Make parking clear and fair.** Parking is mentioned in 42% of reviews (21% at competitors) and "extra cost" appears in complaints. In `hotel_pred`, Ramada has no free-parking flag. State parking availability and cost clearly at booking, consider a parking package, and keep the Tripadvisor listing up to date.
+
+**6. Make service consistent.** Train front-desk staff, empower the duty manager to solve problems on the spot, and make replies to reviews action-oriented (what has been fixed), keeping the strong reply rate.
+
+**7. Target business travellers.** Provide a good work desk, reliable Wi-Fi, quiet rooms and a fast check-in and check-out, since this group rates the hotel lowest.
+
+**8. Promote the strengths.** Market the central location and friendly staff, and invite satisfied guests to leave reviews so that the share of 4-5 star reviews rises.
+
+**9. Track progress.** Suggested targets are an overall rating at the Hamilton average (about 3.8), room, sleep and value ratings within 0.3 points of competitors, and 1-2 star reviews below 20%. Repeat this analysis every 6 to 12 months.
+
+# 12. Conclusion
+
+Ramada has an excellent location and a responsive management team, but guests rate its rooms, sleep quality, cleanliness and value significantly below Hamilton competitors, and there has been no improvement over time. The price model puts the hotel's current price above its central estimate (though within the uncertainty range), so it does not support an increase. The best path is therefore to **improve the guest experience first and revisit the price later**, because better room quality, quieter sleep and cleaner rooms are exactly the drivers that the market rewards.
 
