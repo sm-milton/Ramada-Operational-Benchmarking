@@ -1,16 +1,17 @@
 ---
 title: "Ramada by Wyndham Hamilton City Center: Review Benchmarking and Price Prediction"
-author: "Sheikh Mohammad Milton, ID No. 1713714"
+author: "Sheikh Mohammad Milton"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
   html_document:
     toc: true
     toc_depth: 3
-    number_sections: true
+    number_sections: false
     df_print: paged
   pdf_document:
     toc: true
-    toc_depth: '3'
+    toc_depth: 3
+    number_sections: false
 editor_options:
   chunk_output_type: console
 ---
@@ -20,6 +21,7 @@ knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
 set.seed(123) # makes random steps repeatable
 ramada_id <- 3572177  # Assigning Ramada's Tripadvisor id
+current_price <- 183.50 # Assigning Ramada's current price
 
 ```
 
@@ -77,6 +79,8 @@ tibble(file = c("hotel_main", "hotel_pred", "hotel_review"),
 # Variable names, types and first values
 glimpse(hotel_main)
 glimpse(hotel_review)
+summary(hotel_main)
+summary(hotel_pred)
 
 # A look at a few rows (only key columns, so the table is readable)
 hotel_main |>
@@ -104,11 +108,15 @@ cat("Ramada reviews in hotel_review:", sum(hotel_review$hotel_id == ramada_id), 
 
 cat("Review date range:", format(min(hotel_review$review_date)), "to", format(max(hotel_review$review_date)), "\n")
 
+```
+
+```{r}
 # Basic summary of the main numeric variables
 hotel_main |>
   select(price, room, photo, review, hotel_class, rating_overall) |>
   summary()
 ```
+
 
 ## 2.3 Initial Findings
 
@@ -134,7 +142,7 @@ hotel_main |>
 
 Missing values (`NA`) can break models and bias averages. First we measure how much is missing in each variable, then we decide purposefully what to do for each group of variables (not just delete everything).
 
-```{r missing-main}
+```{r missing main}
 # Percentage of missing values in each column of hotel_main
 
 missing_main <- hotel_main |>
@@ -159,9 +167,10 @@ missing_main <- tibble(
 kable(missing_main,
       col.names = c("Variable", "Missing values (count)", "Missing (%)"),
       caption = paste("Missing values in hotel_main (total rows:", nrow(hotel_main), ")"))
+
 ```
 
-**Interpretation:**
+**Findings:**
 
 * The amenity columns have the most missing values (about 48% to 94%). Because they only contain 1 or `NA`, a missing value really means "the amenity is not listed", so replacing it with 0 is sensible.
 
@@ -182,6 +191,12 @@ hotel_review |>
   filter(pct_missing > 0) |>
   arrange(desc(pct_missing))
 ```
+
+```{r}
+# Delete the unused object
+rm(missing_main)
+```
+
 
 ## 3.2 Removing duplicates
 
@@ -260,6 +275,12 @@ hotel_pred <- add_hotel_vars(hotel_pred)
 
 ```
 
+```{r}
+# Delete the unused object
+rm(amenity_cols)
+rm(add_hotel_vars)
+```
+
 
 ```{r}
 # One table with all hotels (Ramada included) for benchmarking
@@ -274,30 +295,31 @@ hotel_main |>
 ```{r new-variables-review}
 # Variables for the review file
 hotel_review <- hotel_review |>
+  select(-any_of(c("hotel_name", "locality", "category", "locality.x", "locality.y",
+                   "category.x", "category.y", "hotel_name.x", "hotel_name.y"))) |>
   left_join(hotel_all |>
               select(id, hotel_name = name, locality, category),
             by = c("hotel_id" = "id")) |>
   mutate(
     review_year = year(review_date),
-    responded = if_else(is.na(hotel_response), 0, 1),            # did the hotel reply?
-    word_count  = str_count(text, "\\S+"),                       # length of the review
-    trip_type = replace_na(str_to_title(trip_type), "Not stated"),
-    trip_type = if_else(trip_type == "None", "Not stated", trip_type),
+    responded   = if_else(is.na(hotel_response), 0, 1), # did the hotel reply?
+    word_count  = str_count(text, "\\S+"),              # length of the review
+    trip_type   = replace_na(str_to_title(trip_type), "Not stated"),
+    trip_type   = if_else(trip_type == "None", "Not stated", trip_type),
     origin = case_when(
-      is.na(user_location)  ~ "Unknown",
+      is.na(user_location)                     ~ "Unknown",
       str_detect(user_location, "New Zealand") ~ "New Zealand",
-      str_detect(user_location, "Australia") ~ "Australia",
-      TRUE  ~ "Other countries"),
-    full_text = paste(title, text),                             # title + text for text mining
+      str_detect(user_location, "Australia")   ~ "Australia",
+      TRUE                                     ~ "Other countries"),
+    full_text = paste(title, text),                     # title + text for text mining
     sentiment_group = case_when(
       rating_overall >= 4 ~ "Positive (4-5)",
       rating_overall == 3 ~ "Neutral (3)",
       TRUE                ~ "Negative (1-2)"),
-    # who is who?
     group = case_when(
-      hotel_id == ramada_id ~ "Ramada",
+      hotel_id == ramada_id  ~ "Ramada",
       locality == "Hamilton" ~ "Hamilton competitors",
-      TRUE ~ "Other areas")
+      TRUE                   ~ "Other areas")
   )
 
 # How many reviews per group?
@@ -375,6 +397,7 @@ hotel_main |>
   arrange(desc(price)) |>
   select(name, locality, category, price, room) |>
   head(10)
+
 ```
 
 ## 4.2 Ramada's current price versus Hamilton hotels
@@ -394,6 +417,7 @@ cat("Share of Hamilton competitors priced at or below $183.50:", round(mean(ham_
 ham_price |>
   group_by(category) |>
   summarise(hotels = n(), median = median(price))
+
 ```
 
 Findings:
@@ -409,6 +433,11 @@ Findings:
 * Outliers: 33 hotels are above the IQR upper fence of about $403 and 9 are above $1,000. These are luxury lodges, very different from a city hotel such as Ramada, so we exclude hotels above $1,000 when training the model.
 
 * Ramada's position: its current price of $183.50 is close to the overall median, but in Hamilton it is above most competitors. The median Hamilton price is about $148 and Ramada is priced higher than roughly 63% of Hamilton hotels. Only the Hamilton hotels classified as "Moderate" by Tripadvisor have a higher median (about $208), so Ramada is already priced in the upper-middle of its local market.
+
+```{r}
+# Delete the unused object
+rm(price_vals, q1, q3, upper_fence)
+```
 
 ## 4.3 Graphs and interpretation
 
@@ -432,6 +461,7 @@ g2 <- hotel_main |>
   labs(title = "Distribution of log(price)", x = "log(price)", y = "Number of hotels")
 
 grid.arrange(g1, g2, ncol = 2)
+
 ```
 
 **Interpretation:**
@@ -441,6 +471,15 @@ grid.arrange(g1, g2, ncol = 2)
 * The red dashed line shows Ramada's $183.50, which is near the middle of the distribution.
 
 * After taking the log, the shape is much more balanced (skewness falls to about 1.0). 
+
+```{r}
+# Delete the unused object
+rm(g1, g2)
+
+# Clearing plot area
+dev.off()
+```
+
 
 ### Graph 2: Price by type of accommodation and by price category
 
@@ -459,7 +498,8 @@ hotel_main |>
   ggplot(aes(x = star_cat, y = price, fill = star_cat)) +
   geom_boxplot(show.legend = FALSE) +
   scale_y_log10(labels = dollar) +
-  labs(title = "Price by star category (log scale)", x = NULL, y = "Price per night")
+    labs(title = "Price by star category (log scale)", x = NULL, y = "Price per night")
+
 ```
 
 **Interpretation:**
@@ -483,6 +523,7 @@ hotel_main |>
   scale_y_log10(labels = dollar) +
   labs(title = "Price versus overall rating (log price axis)",
        x = "Overall rating (out of 5)", y = "Price per night", colour = "Type")
+
 ```
 
 **Interpretation:**
@@ -513,6 +554,15 @@ corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8, addCoef.col
 
 * The rating variables are strongly correlated with one another (about 0.78 to 0.86, with location lower at 0.58 to 0.71), and the number of photos and number of reviews are almost the same signal (0.88). They carry overlapping information, so a simple linear model may struggle with them (multi-collinearity). Regularized models (lasso/ridge) and tree-based models cope better
 
+```{r}
+# Delete the unused object
+rm(cor_data, cor_matrix)
+
+# Clearing plot area
+dev.off()
+
+```
+
 ### Graph 5: Where are the expensive hotels?
 
 Location is a classic price driver. We look at average price by area and at a simple map of hotels coloured by price.
@@ -536,47 +586,6 @@ hotel_main |>
   scale_colour_viridis_c(trans = "log10", labels = dollar) +
   labs(title = "Hotel locations coloured by price", colour = "Price")
 
-# library(ggplot2)
-# library(dplyr)
-# install.packages("sf")
-# library(sf)
-# install.packages("rnaturalearth")
-# library(rnaturalearth)
-# library(scales) # Required for the 'dollar' label function
-# 
-# # 1. Fetch a background world map
-# world_map <- ne_countries(scale = "medium", returnclass = "sf")
-# 
-# # 2. Clean and convert your hotel data to a spatial (sf) object
-# hotel_map_data <- hotel_main |>
-#   filter(!is.na(price), price <= 1000) |>
-#   # Crucial step: Converts lat/long columns into an sf geometry column
-#   st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
-# 
-# # 3. Build the map with ggplot2
-# ggplot() +
-#   # Draw the background map layer first
-#   geom_sf(data = world_map, fill = "gray95", color = "lightgray", size = 0.2) +
-#   
-#   # Layer your hotel points on top using geom_sf
-#   geom_sf(data = hotel_map_data, aes(colour = price), alpha = 0.8, size = 1.5) +
-#   
-#   # Format the colour gradient and scales
-#   scale_colour_viridis_c(trans = "log10", labels = label_dollar()) +
-#   
-#   # Automatically frame the map boundaries to your specific data points
-#   coord_sf(xlim = range(hotel_main$longitude, na.rm = TRUE), 
-#            ylim = range(hotel_main$latitude, na.rm = TRUE)) +
-#   
-#   # Labels and themes
-#   labs(
-#     title = "Hotel Locations Coloured by Price",
-#     x = "Longitude", 
-#     y = "Latitude",
-#     colour = "Price"
-#   ) +
-#   theme_minimal()
-
 ```
 
 **Interpretation:**
@@ -586,6 +595,12 @@ hotel_main |>
 * The map shows that hotels cluster around towns, and the colour pattern confirms that location is related to price. This is why `area`, latitude and longitude are included in the model.
 
 * Ramada's $183.50 is therefore a relatively high price for Hamilton.
+
+```{r}
+# Clearing plot area
+dev.off()
+```
+
 
 ### Graph 6: Ramada versus Hamilton competitors on each aspect
 
@@ -604,13 +619,26 @@ comparison_hotel |>
   coord_cartesian(ylim = c(0, 5.2)) +
   labs(title = "Ramada vs Hamilton competitors (Tripadvisor hotel-level scores)",
        x = NULL, y = "Average rating (out of 5)", fill = NULL)
+
 ```
 
 **Interpretation:**
 
 * Ramada (red) is **lower than the Hamilton average (grey) on every aspect except location**.
+
 * The biggest gaps are overall rating, room, value and sleep. These are the aspects that guests link most closely to the quality of the physical product and the price paid.
+
 * Location (4.4) is Ramada's strongest score and the main competitive advantage.
+
+```{r}
+# Delete the unused object
+rm(comparison_hotel)
+
+# Clearing plot area
+dev.off()
+
+```
+
 
 ### Graph 7: Distribution of star ratings in reviews
 
@@ -638,6 +666,12 @@ hotel_review |>
 * Five-star reviews make up 19% of Ramada's reviews but 41% of competitors' reviews.
 
 * This means the low average is not caused by a few angry guests. A large share of guests have a poor experience.
+
+```{r}
+# Clearing plot area
+dev.off()
+```
+
 
 ### Graph 8: Has Ramada's rating changed over time?
 
@@ -688,6 +722,13 @@ ramada_reviews |>
 
 * The friends and solo groups are small, so treat those two bars with caution.
 
+```{r}
+# Clearing plot area
+dev.off()
+
+```
+
+
 ### Graph 10: Does the hotel respond to reviews?
 
 Replying to guests (especially unhappy ones) shows that the hotel cares and can protect its reputation. We compare response rates by rating.
@@ -710,6 +751,11 @@ hotel_review |>
 * Ramada replies to 85% to 87% of reviews whatever the rating. Competitors reply to only about 32% of negative reviews, 49% of neutral reviews and 58% of positive reviews.
 
 * Ramada's responsiveness is a real strength: it shows guests that the management is listening. However, replying does not by itself fix the underlying problems that cause the low ratings.
+
+```{r}
+# Clearing plot area
+dev.off()
+```
 
 ## 4.4 Statistical tests
 
@@ -751,6 +797,7 @@ spearman_table <- map_dfr(test_vars, function(v) {
 })
 
 spearman_table
+
 ```
 
 **Interpretation:**
@@ -762,6 +809,11 @@ spearman_table
 * Photos (0.16) and number of amenities (0.10) are statistically significant but very weak. The number of reviews is not significant (p = 0.30), which means popularity does not translate into price.
 
 * Quality indicators (stars and room quality) are what the market pays for. This is important for Ramada, whose room rating (3.2) is low.
+
+```{r}
+# Delete the unused object
+rm(test_vars, spearman_table)
+```
 
 ### Test 3: Is the type of accommodation linked to its price level? (Chi-square)
 
@@ -784,6 +836,11 @@ chisq.test(chi_table)
 * Specialty Lodging is much more likely to be Premium/Luxury (26 of 134 properties, about 19%) than Hotels (6 of 151, about 4%). Hotels are mostly Economy or Moderate.
 
 * This fits the earlier boxplots: very expensive properties are mostly specialty lodges, not hotels like Ramada.
+
+```{r}
+# Delete the unused object
+rm(chi_data, chi_table)
+```
 
 ### Test 4: Is Ramada's rating different from competitors? (Wilcoxon rank-sum)
 
@@ -849,6 +906,11 @@ wilcox.test(rating_overall ~ period, data = ramada_period, exact = FALSE)
 
 * Test 6: the average rating was 2.99 up to 2019 and 3.04 from 2022 onward, with p = 0.68. There is no significant improvement since the COVID period, so the problems have not been solved over time.
 
+```{r}
+# Delete the unused object
+rm(ramada_period)
+```
+
 ### Tests 7 to 10: Parametric tests (t-test, ANOVA, Pearson correlation)
 
 So far we used non-parametric tests, which compare ranks. Parametric tests compare means and are more powerful when their assumptions are reasonable. Their main assumption is roughly normal data, or a large sample size (the Central Limit Theorem makes means behave normally when samples are large). Here we use them where this holds:
@@ -901,8 +963,9 @@ price_data |>
 
 ```{r test-anova-check}
 # Check the ANOVA assumption: are the residuals roughly normal?
+graphics.off()   # closes all plots and resets par() settings
 qqnorm(residuals(anova_model), main = "Normal Q-Q plot of ANOVA residuals")
-qqline(residuals(anova_model), col = "red")
+qqline(residuals(anova_model), col = "red")   # reference line: points near it = roughly normal
 
 # Non-parametric double-check
 kruskal.test(log(price) ~ star_cat, data = price_data)
@@ -925,6 +988,7 @@ pearson_table <- map_dfr(pearson_vars, function(v) {
 })
 
 pearson_table
+
 ```
 
 **Interpretation of Tests 7 to 10:**
@@ -937,7 +1001,16 @@ pearson_table
 
 * Test 10 (Pearson): log(price) has a moderate positive linear correlation with star class (r = 0.54), the room rating (0.39), the overall rating (0.35) and the value rating (0.24). All p-values are far below 0.05. These correlations are stronger than the raw-price correlations in the heatmap (for example 0.35 instead of 0.22 for the overall rating) because the log transformation stops a few extreme prices from dominating. Star class and room quality are what the market pays for most; the value rating is the weakest link to price.
 
-## Dimensionality reduction: Principal Component Analysis (PCA) of the ratings
+```{r}
+# Delete the unused object
+rm(price_data, both, price_area, anova_model, pearson_vars, pearson_table)
+
+# Clearing plot area
+dev.off()
+```
+
+
+## 4.5 Dimensionality reduction: Principal Component Analysis (PCA) of the ratings
 
 We have six rating scores for each hotel (cleanliness, location, room, service, sleep, value), and the correlation heatmap showed they overlap a lot. PCA combines correlated variables into a few new variables called principal components (PCs) that capture most of the information. PC1 captures the largest possible share of the variation, PC2 the next largest, and so on. We standardize the ratings first (`scale. = TRUE`) so that each counts equally. Ramada is included because it is in `hotel_pred`.
 
@@ -951,6 +1024,7 @@ pca_input <- hotel_all |>
 cat("Hotels used for PCA:", nrow(pca_input), "\n")
 
 pca_result <- prcomp(pca_input |> select(starts_with("rating_")), scale. = TRUE)
+
 summary(pca_result)
 ```
 
@@ -1023,7 +1097,17 @@ cor.test(pca_price$PC1, log(pca_price$price))
 
 * Why PCA matters? The six ratings overlap so much that one or two components can replace them in a model and avoid the multicollinearity problem. We kept the original ratings in Phase 4 because they are easier to explain to the manager.
 
-## Cluster analysis: who are Ramada's true peers?
+```{r}
+# Delete the unused object
+rm(pca_input, pca_result, var_explained, loadings, pca_scores, ram, ham, pca_price)
+
+# Clearing plot area
+dev.off()
+
+```
+
+
+## 4.6 Cluster analysis: who are Ramada's true peers?
 
 Comparing Ramada with all Hamilton hotels mixes backpackers, motels and large hotels. K-means clustering groups hotels that are similar on price, overall rating, value rating and number of rooms, so we can see which group Ramada really belongs to. Variables are standardized first so that price (in dollars) does not dominate. We use Ramada's current price of $183.50 (from the brief) because `hotel_pred` has no price.
 
@@ -1112,6 +1196,14 @@ ggplot(cluster_data, aes(x = rating_overall, y = price, colour = cluster, size =
 
 * Ramada charges almost the price of the top group for the satisfaction level of its peer group. This explains its weak value-for-money score and is another reason not to raise the price.
 
+```{r}
+# Delete the unused object
+rm(cluster_data, cluster_scaled, wss, km, cluster_order, ramada_group)
+
+# Clearing plot area
+dev.off()
+```
+
 # 5. Strengths and Weaknesses of Ramada from Reviews
 
 In this phase we mine the written reviews using n-gramS, trying n = 1, 2, 3, 4, 5 and 6 one after the other. Star ratings tell us how guests felt; the words tell us why.
@@ -1143,8 +1235,7 @@ We do not remove stop words (such as "the", "and", "was") at this stage. Inside 
 
 ```{r text-prep}
 # Words that carry little meaning here (used later for topic analysis only)
-custom_stop <- c("hotel", "ramada", "wyndham", "hamilton", "stay", "stayed", "staying",
-                 "night", "nights", "nz", "city", "centre", "center", "sudima")
+custom_stop <- c("hotel", "ramada", "wyndham", "hamilton", "stay", "stayed", "staying","night", "nights", "nz", "city", "centre", "center", "sudima")
 
 # One row per word, in the original order of each review
 tokens_words <- ramada_reviews |>
@@ -1577,6 +1668,14 @@ topic_phrases |>
 
 * *Note:* LDA is a statistical model: the topic numbers can change if the model is rerun with a different random seed, but the groups of words stay similar.
 
+```{r}
+# Delete the unused object
+rm(custom_stop, tokens_words, demo_words, vocab_size, ngram_names, review_texts, count_repeats, ngram_summary, repeat_pct, repeat_table, stop_set, gram_tables, meaningful_summary, mood_colours, add_mood, p, k, cloud_max, cloud_scale, content_words, common_terms, dtm, perplexity_table, lda_model, topic_words, topic_labels, dominant_topic, topic_summary, topic_phrases, cd)
+
+# Clearing plot area
+dev.off()
+```
+
 # 7. Sentiment analysis for n = 1 to 6
 
 Sentiment analysis measures whether text is positive or negative. We score every n-gram with the **Bing dictionary**, which labels words as positive or negative:
@@ -1828,6 +1927,15 @@ The correlation between a review's average n-gram score and its stars is 0.75 fo
 
 **extra charges**: the repeated phrases extra cost (6 reviews, average 2.3), pay for park and pay for wifi (both rated about 1.5 to 2.7).
 
+```{r}
+# Delete the unused object
+rm(bing, positive_words, negative_words, negators, score_ngrams, clean_for_ngrams, ramada_clean, comp_clean, ramada_scored, review_scores, share_list, negation_share, review_scores_all, sentiment_share, sentiment_by_n, k, p, rg, strongest_negative, strongest_positive, cg, g, summarise_reviews)
+
+# Clearing plot area
+dev.off()
+```
+
+
 ## 7.1 Which aspects do guests talk about? (Aspect analysis)
 
 **Why are we doing this?**
@@ -1887,7 +1995,7 @@ aspect_table |>
 
 Linear regression predicts a *number*. **Logistic regression** predicts a *yes/no outcome*; here, "is this review negative (1 or 2 stars)?". The model returns **odds ratios**:
 
-* an odds ratio 
+* An odds ratio:- 
 * **above 1** means the factor makes a negative review *more* likely,
 * **below 1** means *less* likely,
 * **1** means no effect.
@@ -1972,11 +2080,11 @@ We now combine Ramada and competitor reviews and add a Ramada indicator, to see 
 combined_data <- add_flags(bind_rows(ramada_reviews, comp_reviews)) |>
   mutate(is_ramada = as.numeric(group == "Ramada"))
 
-logit_combined <- glm(negative ~ is_ramada + m_room + m_clean + m_noise + m_staff + m_location +
-                        m_parking + m_value + m_facilities + log_words,
+logit_combined <- glm(negative ~ is_ramada + m_room + m_clean + m_noise + m_staff + m_location + m_parking + m_value + m_facilities + log_words,
                       data = combined_data, family = binomial)
 
 round(exp(cbind(odds_ratio = coef(logit_combined), confint.default(logit_combined))), 2)
+
 ```
 
 **Interpretation:**
@@ -2000,6 +2108,15 @@ round(exp(cbind(odds_ratio = coef(logit_combined), confint.default(logit_combine
 **Combined model (Ramada plus competitors)**
 
 * The Ramada indicator has an odds ratio of about **6.3** (95% CI 4.8 to 8.2). Even for reviews of the same length that mention the same topics, a Ramada review has roughly **six times the odds** of being negative compared with a competitor review. The problem is not limited to a single topic: the overall guest experience is worse.
+
+```{r}
+# Delete the unused object
+rm(ramada_reviews, comp_reviews, aspects, aspect_table, aspect_keys, add_flags, ramada_logit_data, logit_train, logit_test, logit_model, logit_index, or_table, prob, pred_class, actual_class, cm, combined_data, logit_combined)
+
+# Clearing plot area
+dev.off()
+```
+
 
 #8. Summary: Ramada's strengths and weaknesses
 
@@ -2052,6 +2169,13 @@ Service 3.59 vs 4.17; "the front desk" (average 2.4), "customer service"; strong
 **More negative wording, and no improvement over time**
 Ramada has about 1.5 times the competitors' share of negative n-grams at every n, and the share has been higher every year since 2014; ratings were 2.99 (up to 2019) vs 3.04 (2022 onward), p = 0.68.
 
+```{r}
+# Delete the unused object
+rm(wilcoxon_table, strength_weakness)
+
+```
+
+
 # 9. Machine Learning Models and Price Prediction
 
 ##9.1 Planning the model
@@ -2103,6 +2227,7 @@ sum(is.na(model_data))   # should be 0
 # Ramada's row goes through exactly the same preparation (used later for predictions)
 ramada_model <- prepare_model_data(hotel_pred) |>
   select(all_of(model_vars))
+
 ```
 
 ## 9.2 Train / test split
@@ -2220,12 +2345,10 @@ set.seed(123)
 fit_lm <- train(lm_formula, data = train_x, method = "lm", trControl = ctrl)   # the model explained above
 
 set.seed(123)
-fit_glmnet <- train(log_price ~ ., data = train_x, method = "glmnet", trControl = ctrl,
-                    preProcess = c("center", "scale"), tuneLength = 10)
+fit_glmnet <- train(log_price ~ ., data = train_x, method = "glmnet", trControl = ctrl, preProcess = c("center", "scale"), tuneLength = 10)
 
 set.seed(123)
-fit_tree <- train(log_price ~ ., data = train_x, method = "rpart", trControl = ctrl,
-                  tuneLength = 10)
+fit_tree <- train(log_price ~ ., data = train_x, method = "rpart", trControl = ctrl, tuneLength = 10)
 
 # KNN needs variables on the same scale, so we centre and scale them; we try k = 3, 5, ..., 25
 set.seed(123)
@@ -2301,12 +2424,7 @@ results |>
 
 **Interpretation:**
 
-* **Best model:** the **`r best_model_name`** has the lowest cross-validated error (about `r round(results$CV_RMSE_log[results$Model == best_model_name], 2)` on the log scale, which means a typical prediction is off by roughly `r round((exp(results$CV_RMSE_log[results$Model == best_model_name]) - 1) * 100)`%). Its cross-validated R-squared is `r round(results$CV_R2[results$Model == best_model_name], 2)`, so it explains about `r round(results$CV_R2[results$Model == best_model_name] * 100)`% of the variation in log price.
-
-* **Test set:** the baseline error is about $`r round(results$Test_RMSE[results$Model == "Baseline (average price)"], 1)`, while the models range from about $`r round(min(results$Test_RMSE[results$Model != "Baseline (average price)"]), 1)` to $`r round(max(results$Test_RMSE[results$Model != "Baseline (average price)"]), 1)`. The improvement over the baseline is **small**, and the single decision tree is worse than simply guessing the average. The test set has only `r nrow(test_data)` hotels, so these dollar figures are noisy (for example KNN looks best on the test set but only fourth on cross-validation). That is why we choose the model with the cross-validated error, which uses many more predictions.
-* **Simple versus complex:** the linear regression and lasso/ridge have cross-validated errors close to the random forest (about 0.40 against 0.38), so the more complicated model gains only a little. The decision tree and KNN are weaker in cross-validation.
-
-* **Honest conclusion:** the variables available explain only part of what hotels charge. Room quality, season, special events, brand and the exact room type are not in the data. The prediction should be used as a **guide, not an exact price**.
+The variables available explain only part of what hotels charge. Room quality, season, special events, brand and the exact room type are not in the data. The prediction should be used as a **guide, not an exact price**.
 
 ## 9.6 Checking the best model
 
@@ -2401,8 +2519,6 @@ ramada_pred_price <- exp(predict(best_fit, ramada_model))
 lower <- ramada_pred_price * exp(-1.28 * rmse_log)
 upper <- ramada_pred_price * exp( 1.28 * rmse_log)
 
-current_price <- 183.50
-
 tibble(
   `Current price`        = current_price,
   `Predicted price`      = round(ramada_pred_price, 2),
@@ -2428,19 +2544,8 @@ tibble(
   Scenario = c("Ramada as it is today", "Ramada rated like the Hamilton average"),
   Predicted_price = round(c(ramada_pred_price, whatif_price), 2)
 )
+
 ```
-
-**Interpretation:**
-
-* **Prediction:** the best model estimates a price of about **$`r round(ramada_pred_price)`** per night, with an approximate 80% range of **$`r round(lower)` to $`r round(upper)`**. The range is wide because hotel prices are hard to predict.
-
-* **Across all models:** the predictions range from about $`r round(min(ramada_predictions$Predicted_price))` to $`r round(max(ramada_predictions$Predicted_price))`.
-
-* **Compared with today's price:** the current $183.50 is about **`r abs(round((183.5 - ramada_pred_price) / ramada_pred_price * 100))`% `r ifelse(183.5 > ramada_pred_price, "above", "below")`** the model's estimate.
-
-* **What-if:** if Ramada's ratings matched the Hamilton average, the model would estimate about **$`r round(whatif_price)`**, an increase of about `r round((whatif_price / ramada_pred_price - 1) * 100)`%. Improving guest experience would support a higher price, but the model is cautious about how much.
-
-* **Meaning:** the model gives **no evidence that the hotel can raise its price now**. The current price is still inside the model's uncertainty range, but it is above the model's central estimate, so there is no data-based case for an increase at present.
 
 ## 10.2 K-nearest neighbour: Ramada's most similar hotels
 
@@ -2474,6 +2579,7 @@ neighbours <- model_raw |>
 neighbours
 cat("Average price of the 5 most similar hotels: $", round(mean(neighbours$price)), "\n")
 cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)), 2), "\n")
+
 ```
 
 **Interpretation:**
@@ -2481,8 +2587,6 @@ cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)
 * **Choosing k:** the error is lowest at about **k = 15** neighbours. With very few neighbours the prediction is noisy, and with many neighbours it becomes too general.
 
 * **Ramada's five most similar hotels** are Te Aroha Holiday Park ($76.50), Anglesea Motel and Conference Centre (about $116), Aspen Manor Motel (about $138), Tudor Motor Lodge (about $130) and Okoroire Hot Springs Hotel ($245). They charge on average about **$141**. Most are Hamilton motels, which agrees with the cluster analysis. Ramada's $183.50 is about 30% above this average.
-
-* The **KNN model estimate** for Ramada is about **$`r round(exp(predict(fit_knn, ramada_model)))`**, which is lower than the other models.
 
 * KNN had the lowest error on the small test set but a worse cross-validated error than the random forest, so we do not rely on it alone. Its message agrees with the others: similar hotels charge less than Ramada does today.
 
@@ -2506,7 +2610,19 @@ cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)
 
 8. **Negative reviews:** even after allowing for topics and review length, a Ramada review has about **six times the odds of being 1-2 stars** compared with a competitor's review. Within Ramada's reviews, mentioning location or staff is linked to happy guests, while noise is the topic most linked to unhappy guests (a hint only, p = 0.099).
 
-9. **Pricing:** Ramada's $183.50 is **higher than about 63% of Hamilton hotels** and about `r abs(round((183.5 - ramada_pred_price) / ramada_pred_price * 100))`% `r ifelse(183.5 > ramada_pred_price, "above", "below")` the best model's estimate of about $`r round(ramada_pred_price)`. The five models estimate between $`r round(min(ramada_predictions$Predicted_price))` and $`r round(max(ramada_predictions$Predicted_price))`. If its ratings matched the Hamilton average, the estimate would rise to about $`r round(whatif_price)`.
+9. **Pricing:** Ramada's $183.50 is **higher than about 63% of Hamilton hotels**.
+
+```{r}
+# 1. Clear all objects (including hidden ones) from memory
+rm(list = ls(all.names = TRUE))
+
+# 2. Shut down and clear all open plot areas/devices
+graphics.off()
+
+# 3. Force R to immediately release the freed RAM back to your system
+gc()
+
+```
 
 ## 11.2 Recommendations
 
@@ -2530,5 +2646,4 @@ cat("KNN model estimate for Ramada: $", round(exp(predict(fit_knn, ramada_model)
 
 # 12. Conclusion
 
-Ramada has an excellent location and a responsive management team, but guests rate its rooms, sleep quality, cleanliness and value significantly below Hamilton competitors, and there has been no improvement over time. The price model puts the hotel's current price above its central estimate (though within the uncertainty range), so it does not support an increase. The best path is therefore to **improve the guest experience first and revisit the price later**, because better room quality, quieter sleep and cleaner rooms are exactly the drivers that the market rewards.
-
+Ramada has an excellent location and a responsive management team, but guests rate its rooms, sleep quality, cleanliness and value significantly below Hamilton competitors, and there has been no improvement over time. The price model puts the hotel's current price above its central estimate (though within the uncertainty range), so it does not support an increase. The best path is therefore to improve the guest experience first and revisit the price later, because better room quality, quieter sleep and cleaner rooms are exactly the drivers that the market rewards.
